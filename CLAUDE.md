@@ -50,9 +50,54 @@ DIT_HAP_verification_organization/
 
 ### Setting up the Environment
 
+The project uses a dedicated mamba environment named "opencv" for development:
+
 ```bash
-# Install dependencies
+# Activate the opencv environment
+mamba activate opencv
+
+# Verify Python path
+which python  # Should show: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
+
+# Install dependencies (if not already installed)
 pip install -r requirements.txt
+```
+
+**Important**: Always activate the "opencv" environment before running any scripts or performing development work.
+
+**Environment Activation Methods**:
+
+**Method 1: Using mamba (preferred)**:
+```bash
+mamba activate opencv
+```
+
+**Method 2: Using PATH export** (if mamba activation doesn't work):
+```bash
+export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH"
+```
+
+**Python Path Verification**:
+```bash
+# Verify you're using the correct Python environment
+which python
+# Should output: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
+
+# Test dependencies
+python -c "import cv2, numpy, pandas, tqdm, openpyxl; print('All dependencies available')"
+```
+
+**Running Scripts with Correct Environment**:
+```bash
+# Method 1: Activate environment first, then run
+mamba activate opencv
+python scripts/rename_image_names.py
+
+# Method 2: Use PATH export in single command
+export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH" && python scripts/rename_image_names.py
+
+# Method 3: Use full Python path
+/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python scripts/rename_image_names.py
 ```
 
 ### Creating New Scripts
@@ -145,14 +190,17 @@ process_replica_images(
 To rename experimental images using systematic conventions:
 
 ```bash
-# Run the renaming script
+# Run the renaming script from project root
 python scripts/rename_image_names.py
 ```
+
+**Important**: Always run scripts from the project root directory to ensure correct relative paths for resource files. The `src/` modules expect to be run from the project root where `resource/` directory is accessible.
 
 This script:
 - Processes all experimental rounds automatically
 - Renames images with format: `{gene_num}_{gene_name}_{day_or_marker}_{colony_id}_{date}`
 - Integrates with gene metadata from PomBase
+- Requires resource files to be present in `resource/` directory
 
 ### Configuration Management
 
@@ -198,6 +246,44 @@ round_config = roundConfig(
 - **Configuration**: Use `@dataclass` for configuration management
 - **Path handling**: Use `pathlib.Path` for all file system operations
 
+## Environment Troubleshooting
+
+### Common Issues and Solutions
+
+1. **Module Import Errors**: Ensure you're running from the project root directory
+   ```bash
+   # Run from DIT_HAP_verification_organization/ directory, not from src/ or scripts/
+   pwd  # Should show: /data/c/yangyusheng_optimized/DIT_HAP_verification_organization
+   ```
+
+2. **Resource File Not Found**: Check that resource files exist in the correct location
+   ```bash
+   ls resource/all_for_verification_genes_by_round.xlsx
+   ls resource/Hayles_2013_OB_merged_categories_sysIDupdated.xlsx
+   ```
+
+3. **Wrong Python Environment**: Verify you're using the opencv environment
+   ```bash
+   which python
+   # Should output: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
+   ```
+
+4. **Missing Dependencies**: Install required packages if needed
+   ```bash
+   /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/pip install -r requirements.txt
+   ```
+
+### Environment Verification Test
+
+To verify your environment is correctly configured, you can run:
+```python
+# Quick environment test
+import sys
+sys.path.append('src')
+import cv2, numpy as pandas, tqdm, openpyxl
+print("Environment configured correctly!")
+```
+
 ## Important Notes
 
 - The project expects specific directory structures for raw and processed data
@@ -205,3 +291,4 @@ round_config = roundConfig(
 - Gene metadata is sourced from PomBase and essentiality studies
 - The centroid adjustment algorithm helps maintain consistency across multiple plates and rounds
 - Always follow the template structure when creating new scripts to maintain code consistency
+- Always activate the "opencv" mamba environment before running scripts
