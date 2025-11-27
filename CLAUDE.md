@@ -10,11 +10,16 @@ This is the **DIT_HAP_verification_organization** project, which focuses on proc
 
 ### Main Components
 
-- **`src/image_processing.py`**: Core computer vision pipeline using OpenCV for colony detection and plate cropping
+- **`src/image_processing.py`**: Advanced OpenCV-based image processing pipeline for colony detection and plate cropping
+  - Template-style architecture with comprehensive type hints and dataclasses
   - Colony detection with adaptive thresholding and circularity analysis
-  - Plate circle detection using Hough circle transform
-  - Tetrad and replica plate processing workflows
-  - Centroid adjustment algorithms for image alignment
+  - Optimized Hough circle detection with configurable parameters
+  - Tetrad and replica plate processing workflows with synchronized dimensions
+  - Centroid adjustment algorithms for image alignment with outlier detection
+  - Enhanced CLAHE parameters for improved contrast and colony detection
+  - Progress tracking with tqdm for batch processing operations
+  - Performance optimizations: memory efficiency, error handling, and graceful degradation
+  - One-line function documentation following template standards
 
 - **`src/utils.py`**: Data management classes and configuration
   - `verificationMetadata`: Handles gene verification metadata from Excel files
@@ -37,7 +42,7 @@ DIT_HAP_verification_organization/
 │   └── __init__.py
 ├── scripts/                  # Execution scripts
 │   ├── rename_image_names.py # Main renaming workflow
-│   └── batch_crop_image.py  # Batch image cropping interface
+│   └── batch_crop_image.py  # Enhanced batch image cropping interface with template-style architecture
 ├── TEMPLATE.py               # Template script for new development
 ├── resource/                 # Data and reference files
 │   ├── Hayles_2013_OB_merged_categories_sysIDupdated.xlsx
@@ -100,9 +105,75 @@ export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH" && py
 /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python scripts/rename_image_names.py
 ```
 
+### Recent Refactoring and Performance Improvements
+
+Both `src/image_processing.py` and `scripts/batch_crop_image.py` have been completely refactored to follow template architecture with significant performance enhancements:
+
+#### Template Structure Implementation:
+- **Comprehensive Documentation**: Module-level docstrings with usage examples and input/output formats
+- **Import Organization**: Standard library → Third-party → Project-specific modules with proper path handling
+- **Configuration Management**: Dataclasses (`@dataclass`) for centralized parameter management
+- **Type Hints**: Complete type annotations for all function parameters and return values
+- **One-line Function Documentation**: Concise docstrings following template standards
+- **Error Handling**: Comprehensive validation and graceful degradation
+
+#### Performance Optimizations:
+- **Progress Tracking**: `tqdm` progress bars for batch processing operations
+- **Enhanced Hough Circle Detection**: Optimized parameters for different plate types (tetrad vs replica)
+- **Improved Colony Detection**: Enhanced CLAHE parameters (clipLimit: 3.0) for better contrast
+- **Memory Efficiency**: Optimized image processing workflow with better memory management
+- **Input Validation**: Pre-flight checks before processing starts with detailed error reporting
+- **Synchronized Processing**: Enhanced coordination between tetrad and replica processing phases
+- **Better Error Recovery**: Graceful handling of processing failures with user-friendly feedback
+
+#### New Configuration Classes:
+- `ImageProcessingConfig`: Base configuration for common processing parameters
+- `TetradConfig`: Specialized configuration for tetrad plate processing
+- `ReplicaConfig`: Specialized configuration for replica plate processing
+- `HoughCircleConfig`: Configurable parameters for Hough circle detection
+- `BatchProcessingConfig`: Centralized configuration for batch operations
+
 ### Creating New Scripts
 
 When adding new functionality, use the provided `TEMPLATE.py` as a starting point. The template follows these conventions:
+
+#### Code Structure Formatting Rules:
+
+**Section Separators:**
+- Use `# %% ------------------------------------ SECTION ------------------------------------ #` for major code sections
+- Use `# %% ------------------------------------ SECTION ------------------------------------ #` to separate between imports, data classes, functions, and main execution
+- This pattern matches the existing `src/utils.py` file structure for consistency
+
+**Example Format:**
+```python
+# %% ------------------------------------ Import libraries ------------------------------------ #
+# Standard library imports
+import sys
+from pathlib import Path
+from dataclasses import dataclass
+
+# %% ------------------------------------ Data classes ------------------------------------ #
+# Configuration dataclasses
+@dataclass
+class Config:
+    parameter1: int = 3
+
+# %% ------------------------------------ Functions ------------------------------------ #
+# Core functions with type hints and docstrings
+def function1(param1: str, param2: int) -> pd.DataFrame:
+    """One line docs of function1."""
+    pass
+
+def main():
+    """Main function to execute the script logic."""
+    pass
+```
+
+This structure provides:
+- Clear visual separation between different code sections
+- Consistent formatting that matches established codebase patterns
+- Easy navigation and maintainability
+- Proper section organization for larger codebases
 
 - **Documentation**: Comprehensive docstring with purpose, usage, and format descriptions
 - **Import Organization**: Standard library first, then third-party, then project-specific modules
@@ -283,6 +354,8 @@ sys.path.append('src')
 import cv2, numpy as pandas, tqdm, openpyxl
 print("Environment configured correctly!")
 ```
+
+# ========================= KeyWord =========================
 
 ## Important Notes
 
