@@ -105,124 +105,89 @@ export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH" && py
 /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python scripts/rename_image_names.py
 ```
 
-### Recent Refactoring and Performance Improvements
+### Research Code Principles and Architecture
 
-Both `src/image_processing.py` and `scripts/batch_crop_image.py` have been completely refactored to follow template architecture with significant performance enhancements:
+This project follows **research code principles** rather than production engineering:
 
-#### Template Structure Implementation:
-- **Comprehensive Documentation**: Module-level docstrings with usage examples and input/output formats
-- **Import Organization**: Standard library → Third-party → Project-specific modules with proper path handling
-- **Configuration Management**: Dataclasses (`@dataclass`) for centralized parameter management
-- **Type Hints**: Complete type annotations for all function parameters and return values
-- **One-line Function Documentation**: Concise docstrings following template standards
-- **Error Handling**: Comprehensive validation and graceful degradation
+#### Simplicity and Modern Python:
+- **Dataclasses**: Use `@dataclass` for simple configuration management, not complex inheritance hierarchies
+- **Type Hints**: Include type annotations for clarity without over-engineering
+- **Clear Functions**: One purpose per function, minimal abstraction layers
+- **Direct Parameters**: Pass parameters directly rather than complex configuration objects
+- **Modern Features**: Use pathlib, f-strings, and other modern Python features
 
-#### Performance Optimizations:
-- **Progress Tracking**: `tqdm` progress bars for batch processing operations
-- **Enhanced Hough Circle Detection**: Optimized parameters for different plate types (tetrad vs replica)
-- **Improved Colony Detection**: Enhanced CLAHE parameters (clipLimit: 3.0) for better contrast
-- **Memory Efficiency**: Optimized image processing workflow with better memory management
-- **Input Validation**: Pre-flight checks before processing starts with detailed error reporting
-- **Synchronized Processing**: Enhanced coordination between tetrad and replica processing phases
-- **Better Error Recovery**: Graceful handling of processing failures with user-friendly feedback
+#### Code Organization:
+- **Avoid Redundancy**: Don't duplicate configuration between `batch_crop_image.py` and `image_processing.py`
+- **Simple Imports**: Standard library → Third-party → Project-specific with clear path handling
+- **Minimal Dependencies**: Only import what's needed for the core functionality
+- **Research-Focused**: Code should be easy to modify and experiment with, not locked into rigid patterns
 
-#### New Configuration Classes:
-- `ImageProcessingConfig`: Base configuration for common processing parameters
-- `TetradConfig`: Specialized configuration for tetrad plate processing
-- `ReplicaConfig`: Specialized configuration for replica plate processing
-- `HoughCircleConfig`: Configurable parameters for Hough circle detection
-- `BatchProcessingConfig`: Centralized configuration for batch operations
+#### Recent Simplifications:
+- **Removed Over-Engineering**: Eliminated complex configuration class hierarchies
+- **Direct Function Calls**: Simplified `batch_crop_image.py` to directly call processing functions
+- **Streamlined image_processing.py**: Focus on core OpenCV functionality without excessive abstraction
+- **Clean Configuration**: Single dataclass with clear parameter names
 
-### Creating New Scripts
+### Creating New Research Scripts
 
-When adding new functionality, use the provided `TEMPLATE.py` as a starting point. The template follows these conventions:
+For research code, prioritize simplicity and modularity over rigid templates:
 
-#### Code Structure Formatting Rules:
+#### Simple Research Script Structure:
 
-**Section Separators:**
-- Use `# %% ------------------------------------ SECTION ------------------------------------ #` for major code sections
-- Use `# %% ------------------------------------ SECTION ------------------------------------ #` to separate between imports, data classes, functions, and main execution
-- This pattern matches the existing `src/utils.py` file structure for consistency
-
-**Example Format:**
 ```python
-# %% ------------------------------------ Import libraries ------------------------------------ #
-# Standard library imports
+"""
+Brief description of what this research script does.
+Usage: python scripts/research_script.py
+"""
+
 import sys
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Tuple, Optional
 
-# %% ------------------------------------ Data classes ------------------------------------ #
-# Configuration dataclasses
+# Add src to path
+sys.path.append(str(Path(__file__).parent.parent.resolve() / "src"))
+
+# Import research modules
+from utils import roundConfig
+from image_processing import process_tetrad_images
+
+# Simple configuration with dataclass
 @dataclass
 class Config:
-    parameter1: int = 3
-
-# %% ------------------------------------ Functions ------------------------------------ #
-# Core functions with type hints and docstrings
-def function1(param1: str, param2: int) -> pd.DataFrame:
-    """One line docs of function1."""
-    pass
+    """Simple configuration for research experiment."""
+    target_radius: int = 490
+    min_colony_size: int = 50
+    visualize_colonies: bool = True
 
 def main():
-    """Main function to execute the script logic."""
-    pass
-```
+    """Main function for research experiment."""
+    config = Config()
+    print("Starting research experiment...")
 
-This structure provides:
-- Clear visual separation between different code sections
-- Consistent formatting that matches established codebase patterns
-- Easy navigation and maintainability
-- Proper section organization for larger codebases
+    # Your research logic here
+    tetrad_size, radius = process_tetrad_images(
+        input_dir='data/input',
+        output_dir='results/output',
+        **config.__dict__
+    )
 
-- **Documentation**: Comprehensive docstring with purpose, usage, and format descriptions
-- **Import Organization**: Standard library first, then third-party, then project-specific modules
-- **Constants**: UPPERCASE naming for configuration values
-- **Dataclasses**: Use `@dataclass` for configuration management
-- **Type Hints**: Include type annotations for all function parameters and return values
-- **Main Block**: Use `if __name__ == "__main__":` pattern with a separate `main()` function
+    print(f"Completed with size: {tetrad_size}")
 
-Template structure:
-```python
-"""
-[Detailed script documentation]
-"""
-
-# Standard library imports
-import sys
-from pathlib import Path
-from dataclasses import dataclass
-
-# Third-party imports
-import pandas as pd
-
-# Project-specific imports (with proper path handling)
-# SCRIPT_DIR = Path(__file__).parent.resolve()
-# TARGET_path = str((SCRIPT_DIR / "../../src").resolve())
-# sys.path.append(TARGET_path)
-# from utils import custom_function
-
-# Constants (UPPERCASE)
-EXAMPLE_THRESHOLD = 100
-DEFAULT_VALUE = 0.5
-
-# Configuration dataclasses
-@dataclass
-class Config:
-    parameter1: int = 3
-
-# Core functions with type hints and docstrings
-def function1(param1: str, param2: int) -> pd.DataFrame:
-    """One line docs of function1."""
-    pass
-
-def main():
-    """Main function to execute the script logic."""
-    pass
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
 ```
+
+#### Key Research Code Principles:
+- **Minimal Structure**: Just imports, simple config, main function
+- **Direct Parameters**: Pass parameters directly to functions
+- **Easy Modification**: Parameters should be easy to change for experiments
+- **Clear Purpose**: Each script should do one research task well
+- **No Over-Engineering**: Avoid complex hierarchies and abstractions
+- **Modern Python**: Use dataclasses, pathlib, type hints for clarity
+- **Section Separators**: Use `# %% ------------------------------------ SECTION ------------------------------------ #` only if script gets long
+
+The goal is code that's easy to understand, modify, and experiment with - not production-grade rigidity.
 
 ### Running Image Processing Pipeline
 
