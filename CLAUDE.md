@@ -115,6 +115,13 @@ This project follows **research code principles** rather than production enginee
 - **Clear Functions**: One purpose per function, minimal abstraction layers
 - **Direct Parameters**: Pass parameters directly rather than complex configuration objects
 - **Modern Features**: Use pathlib, f-strings, and other modern Python features
+- **Type Hint Guidelines**:
+  - Use `dict` instead of `Dict` for general-purpose dictionaries
+  - Use `list` instead of `List` for general-purpose lists
+  - Use `str` instead of `str` for string types
+  - Use `int`, `float` for numeric types
+  - Use `bool` for boolean types
+  - Use `Optional[type]` for nullable types
 
 #### Code Organization:
 - **Avoid Redundancy**: Don't duplicate configuration between `batch_crop_image.py` and `image_processing.py`
@@ -127,6 +134,27 @@ This project follows **research code principles** rather than production enginee
 - **Direct Function Calls**: Simplified `batch_crop_image.py` to directly call processing functions
 - **Streamlined image_processing.py**: Focus on core OpenCV functionality without excessive abstraction
 - **Clean Configuration**: Single dataclass with clear parameter names
+
+### Type Hint Guidelines
+
+For consistent type hints across the codebase:
+
+- **Use `dict` instead of `Dict`** for general-purpose dictionaries
+- **Use `list` instead of `List`** for general-purpose lists
+- **Use `str` instead of `str`** for string types
+- **Use `int`, `float`** for numeric types
+- **Use `bool`** for boolean types
+- **Use `Optional[type]`** for nullable types
+
+```python
+# Preferred type hints
+def process_data(
+    data: dict[str, int],  # Not Dict[str, int]
+    items: list[str],        # Not List[str]
+    enabled: bool = True
+) -> Optional[str]:         # Not Optional[str] for return types
+    return result if condition else None
+```
 
 ### Creating New Research Scripts
 
