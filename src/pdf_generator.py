@@ -13,6 +13,8 @@ from PIL import Image as PILImage, ImageDraw, ImageFont
 from loguru import logger
 import re
 
+from tqdm import tqdm
+
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent))
 
@@ -53,6 +55,12 @@ class PDFGeneratorConfig:
     header_font_size: int = int((header_font_size_pt / 72) * dpi)
     text_font_size: int = int((text_font_size_pt / 72) * dpi)
     line_spacing: int = int((10 / 72) * dpi)  # 10 points line spacing
+
+    # Grid line styling
+    grid_line_width: int = 1  # pixels for consistent grid lines
+    grid_line_color: str = "#333333"  # Dark gray for clear visibility
+    outer_border_width: int = 2  # pixels for outer border
+    outer_border_color: str = "#000000"  # Black for outer border
 
     max_rows_per_page: int = 4  # 4 rows per page
 
@@ -260,7 +268,7 @@ def calculate_dynamic_page_height(
     min_height = int(4.0 * config.dpi)  # 4 inches minimum
     total_height = max(total_height, min_height)
 
-    logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height} pixels ({total_height/config.dpi:.2f} inches)")
+    # logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height} pixels ({total_height/config.dpi:.2f} inches)")
 
     return total_height
 
@@ -357,22 +365,43 @@ def create_gene_page_pil(
 
     current_y = config.margin
 
-    # Draw title with proper spacing
-    title = f"Gene {gene_num} - {gene_name} (Round {round_name})"
-    draw.text((config.margin, current_y), title, fill="black", font=config.title_font)
-    current_y += int(0.25 * config.dpi)  # 0.25 inch spacing
-
-    # Draw summary
+    # Draw title on single line with better formatting
     num_colonies = len(gene_records)
-    summary_text = f"Total Colonies: {num_colonies} | Page {page_index + 1} of {total_genes}"
-    draw.text((config.margin, current_y), summary_text, fill="black", font=config.header_font)
-    current_y += int(0.2 * config.dpi)  # 0.2 inch spacing
+
+    # Title components
+    round_text = f"{round_name}"
+    gene_text = f"Gene {gene_num} - {gene_name}"
+    page_text = f"Total Colonies: {num_colonies} | Page {page_index + 1} of {total_genes}"
+
+    # Fonts
+    regular_font = config.header_font
+    bold_font = config.title_font
+
+    # Calculate text widths
+    round_width = draw.textlength(round_text, font=regular_font)
+    gene_width = draw.textlength(gene_text, font=bold_font)
+    page_width = draw.textlength(page_text, font=regular_font)
+    gap_width = 40  # Gap between sections
+
+    # Calculate starting position for centering
+    total_title_width = round_width + gap_width + gene_width + gap_width + page_width
+    start_x = (config.page_width - total_title_width) // 2
+
+    # Draw title components on single line
+    current_x = start_x
+    draw.text((current_x, current_y), round_text, font=regular_font, fill="black")
+    current_x += round_width + gap_width
+    draw.text((current_x, current_y), gene_text, font=bold_font, fill="black")
+    current_x += gene_width + gap_width
+    draw.text((current_x, current_y), page_text, font=regular_font, fill="black")
+
+    current_y += int(0.25 * config.dpi)  # 0.25 inch spacing
 
     # Draw horizontal line for separation
     line_y = current_y + int(0.05 * config.dpi)
     draw.line(
         [(config.margin, line_y), (config.page_width - config.margin, line_y)],
-        fill="black", width=1
+        fill=config.outer_border_color, width=config.outer_border_width
     )
     current_y = line_y + int(0.1 * config.dpi)  # 0.1 inch spacing
 
@@ -447,27 +476,53 @@ def create_gene_page_pil(
                 fill="#fafafa"
             )
 
-        # Draw gene info text with better formatting
-        gene_info_text = (
-            f"Gene: {record_gene_num} - {record_gene_name}\n"
-            f"Colony: {colony_id}, Date: {date}\n"
-            f"Category: {phenotype_category}\n"
-            f"Essentiality: {essentiality}"
-        )
-
-        # Draw gene info with proper padding
+        # Draw gene info with improved layout
         current_x = config.margin + config.cell_padding
         current_y_inner = current_y + config.cell_padding
-        current_y_inner = draw_text_with_wrapping(
-            draw, gene_info_text, current_x, current_y_inner,
-            gene_info_width - 2 * config.cell_padding, config.text_font, config.line_spacing
-        )
+
+        # First line: Gene, Colony, Date
+        line1_text = f"Gene: {record_gene_num} - {record_gene_name}   Colony: {colony_id}   Date: {date}"
+        draw.text((current_x, current_y_inner), line1_text, font=config.text_font, fill="black")
+        current_y_inner += config.line_spacing
+
+        # Second line: Category and Essentiality with bold content
+        # Create bold text by drawing twice with slight offset for emphasis
+        bold_text_font = config.text_font
+        category_label = "Category:"
+        essentiality_label = "Essentiality:"
+        category_text = f"{category_label} **{phenotype_category}**"
+        essentiality_text = f"{essentiality_label} **{essentiality}**"
+
+        # Combine category and essentiality on same line with gap
+        gap_text = "   "
+        line2_text = f"{category_label} {phenotype_category}{gap_text}{essentiality_label} {essentiality}"
+
+        # Draw labels regular and content slightly darker/bolder
+        # Split line2_text to handle bold formatting manually
+        label_width = draw.textlength(category_label, font=config.text_font)
+        content_width = draw.textlength(f" {phenotype_category}{gap_text}{essentiality_label}", font=config.text_font)
+
+        # Draw "Category:" in regular, content in simulated bold
+        draw.text((current_x, current_y_inner), category_label, font=config.text_font, fill="black")
+        # Simulate bold by drawing text twice with slight offset
+        content_x = current_x + label_width + 5
+        draw.text((content_x, current_y_inner), phenotype_category, font=config.text_font, fill="black")
+        draw.text((content_x + 1, current_y_inner), phenotype_category, font=config.text_font, fill="black")  # Bold effect
+
+        # Draw essentiality
+        essentiality_x = content_x + draw.textlength(f" {phenotype_category}{gap_text}", font=config.text_font) + 5
+        draw.text((essentiality_x, current_y_inner), essentiality_label, font=config.text_font, fill="black")
+        content_x = essentiality_x + draw.textlength(f"{essentiality_label} ", font=config.text_font)
+        draw.text((content_x, current_y_inner), essentiality, font=config.text_font, fill="black")
+        draw.text((content_x + 1, current_y_inner), essentiality, font=config.text_font, fill="black")  # Bold effect
+
+        current_y_inner += config.line_spacing
 
         # Draw vertical grid lines
         current_x = config.margin + gene_info_width
         draw.line(
             [(current_x, current_y), (current_x, current_y + row_height)],
-            fill="gray", width=1
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
         # Draw images for each column with centering
@@ -476,21 +531,37 @@ def create_gene_page_pil(
             # Draw vertical grid line before column
             draw.line(
                 [(current_x, current_y), (current_x, current_y + row_height)],
-                fill="gray", width=1
+                fill=config.grid_line_color, width=config.grid_line_width
             )
 
             image_path = get_image_for_gene_colony(df, record_gene_num, record_gene_name, colony_id, date, column)
 
             if image_path and validate_image(image_path, config):
                 try:
-                    # Load and resize image with high quality
+                    # Load and resize image with high quality, maintaining aspect ratio
                     with PILImage.open(image_path) as img_colony:
-                        # Ensure image has proper aspect ratio
-                        img_colony = img_colony.resize((image_col_width - 2*config.cell_padding, config.image_height), PILImage.Resampling.LANCZOS)
+                        # Calculate max dimensions that fit in the cell
+                        max_width = image_col_width - 2*config.cell_padding
+                        max_height = row_height - 2*config.cell_padding
+
+                        # Get original dimensions
+                        original_width, original_height = img_colony.size
+
+                        # Calculate scaling factor to fit within max dimensions while maintaining aspect ratio
+                        scale_x = max_width / original_width
+                        scale_y = max_height / original_height
+                        scale = min(scale_x, scale_y)  # Use the smaller scale to ensure both dimensions fit
+
+                        # Calculate new dimensions
+                        new_width = int(original_width * scale)
+                        new_height = int(original_height * scale)
+
+                        # Resize with high quality maintaining aspect ratio
+                        img_colony = img_colony.resize((new_width, new_height), PILImage.Resampling.LANCZOS)
 
                         # Center image in cell
-                        img_x = current_x + (image_col_width - img_colony.width) // 2
-                        img_y = current_y + (row_height - img_colony.height) // 2
+                        img_x = current_x + (image_col_width - new_width) // 2
+                        img_y = current_y + (row_height - new_height) // 2
 
                         img.paste(img_colony, (img_x, img_y))
                 except Exception as e:
@@ -518,13 +589,13 @@ def create_gene_page_pil(
         # Draw final vertical line
         draw.line(
             [(current_x, current_y), (current_x, current_y + row_height)],
-            fill="gray", width=1
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
         # Draw horizontal line for row
         draw.line(
             [(config.margin, current_y + row_height), (config.page_width - config.margin, current_y + row_height)],
-            fill="gray", width=1
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
         current_y += row_height
@@ -532,7 +603,7 @@ def create_gene_page_pil(
     # Draw outer border
     draw.rectangle(
         [config.margin, config.margin, config.page_width - config.margin, current_y],
-        outline="black", width=2
+        outline=config.outer_border_color, width=config.outer_border_width
     )
 
     # Save as high-quality PNG first (300 DPI)
@@ -600,8 +671,8 @@ def create_verification_pdf(
     temp_png_files = []
     total_genes = len(gene_groups)
 
-    for i, gene_group in enumerate(gene_groups):
-        logger.info(f"Creating page {i + 1}/{total_genes} for gene {gene_group[0]['gene_num']} ({len(gene_group)} colonies)")
+    for i, gene_group in tqdm(enumerate(gene_groups), total=total_genes, desc="Generating PDF pages"):
+        # logger.info(f"Creating page {i + 1}/{total_genes} for gene {gene_group[0]['gene_num']} ({len(gene_group)} colonies)")
 
         try:
             temp_png_path = create_gene_page_pil(
@@ -672,7 +743,8 @@ def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = 
         if round_name:
             # Process specific round
             if round_name in all_sheets:
-                logger.info(f"Processing round: {round_name}")
+                logger.info("")
+                logger.info("-"*30 + f"Processing round: {round_name}" + "-"*30)
                 df = all_sheets[round_name]
                 create_verification_pdf(df, config, round_name)
             else:
@@ -684,7 +756,8 @@ def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = 
                     continue
 
                 try:
-                    logger.info(f"Processing round: {sheet_name}")
+                    logger.info("")
+                    logger.info("-"*30 + f"Processing round: {sheet_name}" + "-"*30)
                     df = all_sheets[sheet_name]
                     create_verification_pdf(df, config, sheet_name)
                 except Exception as e:
