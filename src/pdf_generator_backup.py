@@ -15,7 +15,6 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
 from reportlab.lib.units import inch
 from loguru import logger
-import re
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent))
@@ -83,6 +82,7 @@ def extract_colony_number(colony_id: str) -> int:
             return ord(colony_id.upper()) - ord('A') + 1
         else:
             # Extract numbers from mixed IDs like "colonyA1"
+            import re
             numbers = re.findall(r'\d+', colony_id)
             return int(numbers[0]) if numbers else 0
     except Exception:
@@ -257,110 +257,19 @@ def create_gene_info_text(
 
     matching_records = df[mask]
     if matching_records.empty:
-        return f"Gene: {gene_num} - {gene_name}<br/>Colony: {colony_id}, Date: {date}<br/>Category: N/A"
+        return f"Gene: {gene_num} - {gene_name}<br/>Colony: {colony_id}<br/>Date: {date}<br/>Category: N/A"
 
     record = matching_records.iloc[0]
 
-    # Build gene info text with Colony and Date on same line
+    # Build gene info text line by line
     info_lines = [
         f"Gene: {gene_num} - {gene_name}",
-        f"Colony: {colony_id}, Date: {date}",
+        f"Colony: {colony_id}",
+        f"Date: {date}",
         f"Category: {record.get('phenotype_categories', 'N/A')}"
     ]
 
     return "<br/>".join(info_lines)
-
-
-@logger.catch
-def create_pdf_table(
-    doc: SimpleDocTemplate,
-    styles: dict,
-    df: pd.DataFrame,
-    gene_records: list[dict],
-    config: PDFGeneratorConfig
-):
-    """
-    Create a PDF table with gene information and images.
-
-    Args:
-        doc: SimpleDocTemplate object
-        styles: Dictionary of paragraph styles
-        df: Verification table DataFrame
-        gene_records: List of gene records for this page (all have same gene_num)
-        config: PDF generator configuration
-
-    Returns:
-        List of flowable elements for the table
-    """
-    # Define column structure: gene_info + 4 time_points + 5 replica_markers = 10 columns
-    time_point_columns = ['3d', '4d', '5d', '6d']
-    replica_columns = ['YES', 'HYG', 'NAT', 'LEU', 'ADE']
-    all_columns = ['Gene Info'] + time_point_columns + replica_columns
-
-    # Calculate column widths for landscape format - optimized for 10 columns
-    usable_width = (config.page_width - 2 * config.margin * inch) / inch
-
-    # Better width distribution for landscape: gene info gets 2.5", images get remaining width/9
-    gene_info_width = 2
-    image_width = (usable_width - gene_info_width) / 9  # 9 image columns (4 time points + 5 replicas)
-
-    # Ensure minimum image width for visibility
-    min_image_width = 0.8
-    image_width = max(image_width, min_image_width)
-
-    # Total columns: 1 gene info + 9 image columns = 10 columns
-    col_widths = [gene_info_width] + [image_width] * 9
-
-    # Create table for this gene (all records have same gene_num)
-    table_data = []
-    headers = all_columns
-    table_data.append(headers)
-
-    for record in gene_records:
-        gene_num = record['gene_num']
-        gene_name = record['gene_name']
-        colony_id = record['colony_id']
-        date = record['date']
-
-        # Create gene info text
-        gene_info_text = create_gene_info_text(df, gene_num, gene_name, colony_id, date)
-        row_data = [Paragraph(gene_info_text, styles['gene_info'])]
-
-        # Add images for each column
-        for column in time_point_columns + replica_columns:
-            image_path = get_image_for_gene_colony(df, gene_num, gene_name, colony_id, date, column)
-
-            if image_path and validate_image(image_path, config):
-                try:
-                    img = Image(str(image_path), width=config.image_width * inch, height=config.image_height * inch)
-                    row_data.append(img)
-                except Exception as e:
-                    logger.error(f"Error adding image {image_path}: {e}")
-                    row_data.append(Paragraph("Error", styles['gene_info']))
-            else:
-                row_data.append(Paragraph("No Image", styles['gene_info']))
-
-        table_data.append(row_data)
-
-    # Create table for this gene
-    if table_data:
-        table = Table(table_data, colWidths=[w * inch for w in col_widths])
-
-        # Style table
-        style = TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), config.text_font_size),
-            ('PADDING', (0, 0), (-1, -1), 3),
-        ])
-
-        table.setStyle(style)
-        return [table, Spacer(1, config.spacing * inch)]
-
-    return []
 
 
 @logger.catch
@@ -452,27 +361,144 @@ def create_verification_pdf(
     story.append(Paragraph(summary_text, styles['gene_info']))
     story.append(Spacer(1, 0.25 * inch))
 
-    # Add pages with gene data - one page per gene_num with page breaks
+    # Add pages with gene data
     for i, gene_group in enumerate(gene_groups):
-        if i > 0:  # Add explicit page break between different genes
-            story.append(Spacer(1, 0.1 * inch))
+        if i > 0:  # Add page break between groups
+            story.append(Spacer(1, 0.5 * inch))
 
-        # Create table for this gene
-        table_elements = create_pdf_table(doc, styles, df, gene_group, config)
-
-        # Add table elements
-        story.extend(table_elements)
-
-        # Add page break after each gene except the last one
-        if i < len(gene_groups) - 1:
-            from reportlab.platypus import PageBreak
-            story.append(PageBreak())
+        story.extend(create_pdf_table(doc, styles, df, gene_group, config))
 
     # Build PDF
     doc.build(story)
 
     logger.success(f"Generated verification PDF: {output_path}")
     return output_path
+
+
+@logger.catch
+def create_pdf_table(
+    doc: SimpleDocTemplate,
+    styles: dict,
+    df: pd.DataFrame,
+    gene_records: list[dict],
+    config: PDFGeneratorConfig
+):
+    """
+    Create a PDF table with gene information and images.
+
+    Args:
+        doc: SimpleDocTemplate object
+        styles: Dictionary of paragraph styles
+        df: Verification table DataFrame
+        gene_records: List of gene records for this page
+        config: PDF generator configuration
+
+    Returns:
+        List of flowable elements for the table
+    """
+    # Define column structure: gene_info + 4 time_points + 5 replica_markers = 10 columns
+    time_point_columns = ['3d', '4d', '5d', '6d']
+    replica_columns = ['YES', 'HYG', 'NAT', 'LEU', 'ADE']
+    all_columns = ['Gene Info'] + time_point_columns + replica_columns
+
+    # Calculate column widths for landscape format - optimized for 10 columns
+    usable_width = (config.page_width - 2 * config.margin * inch) / inch
+
+    # Better width distribution for landscape: gene info gets 2.5", images get remaining width/9
+    gene_info_width = 2.5
+    image_width = (usable_width - gene_info_width) / 9  # 9 image columns (4 time points + 5 replicas)
+
+    # Ensure minimum image width for visibility
+    min_image_width = 0.8
+    image_width = max(image_width, min_image_width)
+
+    # Total columns: 1 gene info + 9 image columns = 10 columns
+    col_widths = [gene_info_width] + [image_width] * 9
+
+    # Create table for this gene (all records have same gene_num)
+    current_gene = None
+    current_group = []
+
+    for record in gene_records:
+        gene_num = record['gene_num']
+
+        if current_gene is None:
+            current_gene = gene_num
+            current_group = [record]
+        elif gene_num == current_gene:
+            # Same gene, add to current group
+            current_group.append(record)
+        else:
+            # Different gene, save current group and start new one
+            if current_group:
+                gene_groups.append(current_group)
+            current_gene = gene_num
+            current_group = [record]
+
+    # Add the last group
+    if current_group:
+        gene_groups.append(current_group)
+
+    # Create separate tables for each gene group with spacing
+    all_elements = []
+
+    for group_idx, gene_group in enumerate(gene_groups):
+        # Create table data for this gene group
+        table_data = []
+        headers = all_columns
+        table_data.append(headers)
+
+        for record in gene_group:
+            gene_num = record['gene_num']
+            gene_name = record['gene_name']
+            colony_id = record['colony_id']
+            date = record['date']
+
+            # Create gene info text
+            gene_info_text = create_gene_info_text(df, gene_num, gene_name, colony_id, date)
+            row_data = [Paragraph(gene_info_text, styles['gene_info'])]
+
+            # Add images for each column
+            for column in time_point_columns + replica_columns:
+                image_path = get_image_for_gene_colony(df, gene_num, gene_name, colony_id, date, column)
+
+                if image_path and validate_image(image_path, config):
+                    try:
+                        img = Image(str(image_path), width=config.image_width * inch, height=config.image_height * inch)
+                        row_data.append(img)
+                    except Exception as e:
+                        logger.error(f"Error adding image {image_path}: {e}")
+                        row_data.append(Paragraph("Error", styles['gene_info']))
+                else:
+                    row_data.append(Paragraph("No Image", styles['gene_info']))
+
+            table_data.append(row_data)
+
+        # Create table for this gene group
+        if table_data:
+            table = Table(table_data, colWidths=[w * inch for w in col_widths])
+
+            # Style table with gene group separation
+            style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.white),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), config.text_font_size),
+                ('PADDING', (0, 0), (-1, -1), 3),
+                # Add thicker border below the last row of each gene group
+                ('LINEBELOW', (0, len(headers) - 1), (-1, len(table_data) - 1), 2, colors.black),
+            ])
+
+            table.setStyle(style)
+            all_elements.append(table)
+
+            # Add spacing between gene groups (except after the last group)
+            if group_idx < len(gene_groups) - 1:
+                all_elements.append(Spacer(1, 0.2 * inch))  # 0.2" gap between gene groups
+
+    return all_elements
 
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
