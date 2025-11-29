@@ -1,7 +1,7 @@
 """
 PDF generation for DIT-HAP verification pipeline.
 Creates formatted PDF documents compiling cropped images with metadata.
-Refactored for cleaner structure and better format handling.
+Refactored to use PILLOW only for simpler logic.
 """
 
 import sys
@@ -9,11 +9,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 import pandas as pd
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
-from reportlab.lib.units import inch
+from PIL import Image as PILImage, ImageDraw, ImageFont
 from loguru import logger
 import re
 
@@ -24,23 +20,40 @@ sys.path.append(str(Path(__file__).parent))
 # %% ------------------------------------ Configuration ------------------------------------ #
 @dataclass
 class PDFGeneratorConfig:
-    """Configuration for PDF generation."""
+    """Configuration for PDF generation with high resolution."""
     # Input/output paths
     processed_data_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion")
     output_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/merged_pdfs/DIT_HAP_deletion")
     table_structures_path: Path = Path("../results")  # Path to table structures output from table_organizer.py
 
-    # PDF layout parameters
-    page_size: str = "A4_landscape"  # "letter", "A4", "letter_landscape", "A4_landscape"
-    margin: float = 0.25  # inches (smaller margin for landscape)
-    image_width: float = 0.9  # inches for individual images (slightly smaller for more columns)
-    image_height: float = 0.35  # inches for individual images (maintain aspect ratio)
-    spacing: float = 0.05  # inches between elements
+    # High resolution PDF parameters (300 DPI for print quality)
+    dpi: int = 300  # Dots per inch for high quality
+    page_width_inches: float = 11.69  # A4 landscape width in inches
+    page_height_base: float = 8.27  # A4 landscape height in inches (base, will be extended)
+    margin_inches: float = 0.5  # margin in inches
 
-    # Content parameters
-    title_font_size: int = 16
-    header_font_size: int = 12
-    text_font_size: int = 9
+    # Convert to pixels for PILLOW
+    page_width: int = int(11.69 * dpi)  # A4 landscape width at 300 DPI
+    margin: int = int(0.5 * dpi)  # margin in pixels
+
+    # Image sizes in pixels (high resolution)
+    image_width: int = int(1.0 * dpi)  # 1 inch width at 300 DPI = 300 pixels
+    image_height: int = int(0.4 * dpi)  # 0.4 inch height at 300 DPI = 120 pixels
+    cell_padding: int = int(0.05 * dpi)  # 0.05 inch padding = 15 pixels
+    border_width: int = 1  # border width in pixels
+    spacing: int = int(0.1 * dpi)  # spacing between elements in pixels
+
+    # Text settings (optimized for high DPI)
+    title_font_size_pt: int = 16  # points
+    header_font_size_pt: int = 12  # points
+    text_font_size_pt: int = 9  # points
+
+    # Convert points to pixels for PILLOW (72 points per inch, but we scale for DPI)
+    title_font_size: int = int((title_font_size_pt / 72) * dpi)
+    header_font_size: int = int((header_font_size_pt / 72) * dpi)
+    text_font_size: int = int((text_font_size_pt / 72) * dpi)
+    line_spacing: int = int((10 / 72) * dpi)  # 10 points line spacing
+
     max_rows_per_page: int = 4  # 4 rows per page
 
     # Quality thresholds for image inclusion
@@ -48,20 +61,41 @@ class PDFGeneratorConfig:
     min_image_height: int = 100
     max_file_size_mb: float = 10.0
 
+    # Font settings
+    title_font = None
+    header_font = None
+    text_font = None
+
+    try:
+        # Try to use Arial font with high quality anti-aliasing
+        font_family = "arial.ttf"
+        title_font = ImageFont.truetype(font_family, title_font_size, index=0)
+        header_font = ImageFont.truetype(font_family, header_font_size, index=0)
+        text_font = ImageFont.truetype(font_family, text_font_size, index=0)
+        logger.info(f"Using Arial font at {dpi} DPI")
+    except Exception as e:
+        # Try system fonts as fallback
+        try:
+            import os
+            if os.name == 'nt':  # Windows
+                font_family = "C:/Windows/Fonts/arial.ttf"
+            else:  # Linux/Unix
+                font_family = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+            title_font = ImageFont.truetype(font_family, title_font_size)
+            header_font = ImageFont.truetype(font_family, header_font_size)
+            text_font = ImageFont.truetype(font_family, text_font_size)
+            logger.info(f"Using system font: {font_family}")
+        except Exception:
+            # Last resort to default font
+            logger.warning(f"System fonts not available, using default font: {e}")
+            title_font = ImageFont.load_default()
+            header_font = ImageFont.load_default()
+            text_font = ImageFont.load_default()
+
     def __post_init__(self):
         # Ensure output directory exists
         self.output_base_path.mkdir(parents=True, exist_ok=True)
-
-        # Set page size with landscape support
-        page_size_lower = self.page_size.lower()
-        if page_size_lower == "letter":
-            self.page_width, self.page_height = letter
-        elif page_size_lower == "letter_landscape":
-            self.page_width, self.page_height = letter[1], letter[0]  # Swap for landscape
-        elif page_size_lower == "a4_landscape":
-            self.page_width, self.page_height = A4[1], A4[0]  # Swap for landscape
-        else:
-            self.page_width, self.page_height = A4
 
 
 # %% ------------------------------------ Helper Functions ------------------------------------ #
@@ -111,43 +145,6 @@ def sort_dataframe_by_gene_and_colony(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @logger.catch
-def create_pdf_styles(config: PDFGeneratorConfig):
-    """Create PDF styles for document."""
-    styles = getSampleStyleSheet()
-
-    # Custom styles
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=config.title_font_size,
-        spaceAfter=12,
-        alignment=1  # Center
-    )
-
-    header_style = ParagraphStyle(
-        'CustomHeader',
-        parent=styles['Heading2'],
-        fontSize=config.header_font_size,
-        spaceAfter=6
-    )
-
-    # Gene info style with smaller font
-    gene_info_style = ParagraphStyle(
-        'GeneInfo',
-        parent=styles['Normal'],
-        fontSize=config.text_font_size,
-        spaceAfter=2,
-        leading=10  # Tighter line spacing
-    )
-
-    return {
-        'title': title_style,
-        'header': header_style,
-        'gene_info': gene_info_style
-    }
-
-
-@logger.catch
 def validate_image(image_path: Path, config: PDFGeneratorConfig) -> bool:
     """
     Validate that image meets quality requirements for PDF inclusion.
@@ -160,8 +157,6 @@ def validate_image(image_path: Path, config: PDFGeneratorConfig) -> bool:
         True if image is valid for inclusion
     """
     try:
-        from PIL import Image as PILImage
-
         if not image_path.exists():
             return False
 
@@ -227,182 +222,105 @@ def get_image_for_gene_colony(
 
 
 @logger.catch
-def create_gene_info_text(
-    df: pd.DataFrame,
-    gene_num: str,
-    gene_name: str,
-    colony_id: str,
-    date: str
-) -> str:
-    """
-    Create gene information text for PDF table.
-
-    Args:
-        df: Verification table DataFrame
-        gene_num: Gene number
-        gene_name: Gene name
-        colony_id: Colony identifier
-        date: Date string
-
-    Returns:
-        Formatted text string for gene info
-    """
-    # Filter for the specific record
-    mask = (
-        (df['gene_num'] == gene_num) &
-        (df['gene_name'] == gene_name) &
-        (df['colony_id'] == colony_id) &
-        (df['date'] == date)
-    )
-
-    matching_records = df[mask]
-    if matching_records.empty:
-        return f"Gene: {gene_num} - {gene_name}<br/>Colony: {colony_id}, Date: {date}<br/>Category: N/A"
-
-    record = matching_records.iloc[0]
-
-    # Build gene info text with Colony and Date on same line
-    info_lines = [
-        f"Gene: {gene_num} - {gene_name}",
-        f"Colony: {colony_id}, Date: {date}",
-        f"Category: {record.get('phenotype_categories', 'N/A')}"
-    ]
-
-    return "<br/>".join(info_lines)
-
-
-@logger.catch
-def calculate_dynamic_page_size(
+def calculate_dynamic_page_height(
     gene_records: list[dict],
     config: PDFGeneratorConfig
-) -> tuple[float, float]:
+) -> int:
     """
-    Calculate dynamic page size based on number of colonies for a gene.
+    Calculate dynamic page height based on number of colonies for a gene with high resolution.
 
     Args:
         gene_records: List of gene records for this gene (all have same gene_num)
         config: PDF generator configuration
 
     Returns:
-        Tuple of (page_width, page_height) in points
+        Height in pixels
     """
-    # Base height for header, summary, and spacing
-    base_height_points = 120  # Title + summary + spacing
+    # Base height for header, summary, and spacing (in pixels at 300 DPI)
+    base_height = int(2.0 * config.dpi)  # 2 inches for title + summary
 
-    # Height per row: image height + padding + borders
-    row_height_points = (config.image_height * 72) + 20  # Convert inches to points, add padding
+    # Height per row: image height + gene info text + padding + borders
+    gene_info_height = int(0.3 * config.dpi)  # 0.3 inches for gene info text
+    row_height = max(
+        config.image_height,
+        gene_info_height
+    ) + int(0.15 * config.dpi)  # Add padding between rows
 
     # Calculate height based on number of colonies
     num_colonies = len(gene_records)
-    content_height_points = row_height_points * num_colonies
+    content_height = row_height * num_colonies
+
+    # Add header row
+    header_height = int(0.2 * config.dpi)  # 0.2 inches for table headers
 
     # Total height
-    total_height_points = base_height_points + content_height_points
+    total_height = base_height + header_height + content_height + int(0.5 * config.dpi)  # Extra spacing
 
     # Set minimum height for very small genes
-    min_height_points = 300
-    total_height_points = max(total_height_points, min_height_points)
+    min_height = int(4.0 * config.dpi)  # 4 inches minimum
+    total_height = max(total_height, min_height)
 
-    # Use landscape width from config
-    page_width = config.page_width
+    logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height} pixels ({total_height/config.dpi:.2f} inches)")
 
-    logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height_points:.1f} points")
-
-    return page_width, total_height_points
+    return total_height
 
 
 @logger.catch
-def create_pdf_table(
-    styles: dict,
-    df: pd.DataFrame,
-    gene_records: list[dict],
-    config: PDFGeneratorConfig
-):
+def draw_text_with_wrapping(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    x: int,
+    y: int,
+    max_width: int,
+    font,
+    line_spacing: int = 15
+) -> int:
     """
-    Create a PDF table with gene information and images.
+    Draw text with automatic line wrapping.
 
     Args:
-        styles: Dictionary of paragraph styles
-        df: Verification table DataFrame
-        gene_records: List of gene records for this page (all have same gene_num)
-        config: PDF generator configuration
+        draw: ImageDraw object
+        text: Text to draw
+        x: X coordinate
+        y: Y coordinate
+        max_width: Maximum width before wrapping
+        font: Font to use
+        line_spacing: Space between lines
 
     Returns:
-        List of flowable elements for the table
+        Y coordinate after drawing all text
     """
-    # Define column structure: gene_info + 4 time_points + 5 replica_markers = 10 columns
-    time_point_columns = ['3d', '4d', '5d', '6d']
-    replica_columns = ['YES', 'HYG', 'NAT', 'LEU', 'ADE']
-    all_columns = ['Gene Info'] + time_point_columns + replica_columns
+    # Simple text wrapping by character
+    words = text.split()
+    lines = []
+    current_line = ""
 
-    # Calculate column widths for landscape format - optimized for 10 columns
-    usable_width = (config.page_width - 2 * config.margin * inch) / inch
+    for word in words:
+        test_line = current_line + (" " if current_line else "") + word
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        text_width = bbox[2] - bbox[0]
 
-    # Better width distribution for landscape: gene info gets 2.5", images get remaining width/9
-    gene_info_width = 2
-    image_width = (usable_width - gene_info_width) / 9  # 9 image columns (4 time points + 5 replicas)
+        if text_width <= max_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
 
-    # Ensure minimum image width for visibility
-    min_image_width = 0.8
-    image_width = max(image_width, min_image_width)
+    if current_line:
+        lines.append(current_line)
 
-    # Total columns: 1 gene info + 9 image columns = 10 columns
-    col_widths = [gene_info_width] + [image_width] * 9
+    # Draw each line
+    current_y = y
+    for line in lines:
+        draw.text((x, current_y), line, fill="black", font=font)
+        current_y += line_spacing
 
-    # Create table for this gene (all records have same gene_num)
-    table_data = []
-    headers = all_columns
-    table_data.append(headers)
-
-    for record in gene_records:
-        gene_num = record['gene_num']
-        gene_name = record['gene_name']
-        colony_id = record['colony_id']
-        date = record['date']
-
-        # Create gene info text
-        gene_info_text = create_gene_info_text(df, gene_num, gene_name, colony_id, date)
-        row_data = [Paragraph(gene_info_text, styles['gene_info'])]
-
-        # Add images for each column
-        for column in time_point_columns + replica_columns:
-            image_path = get_image_for_gene_colony(df, gene_num, gene_name, colony_id, date, column)
-
-            if image_path and validate_image(image_path, config):
-                try:
-                    img = Image(str(image_path), width=config.image_width * inch, height=config.image_height * inch)
-                    row_data.append(img)
-                except Exception as e:
-                    logger.error(f"Error adding image {image_path}: {e}")
-                    row_data.append(Paragraph("Error", styles['gene_info']))
-            else:
-                row_data.append(Paragraph("No Image", styles['gene_info']))
-
-        table_data.append(row_data)
-
-    # Create table for this gene
-    if table_data:
-        table = Table(table_data, colWidths=[w * inch for w in col_widths])
-
-        # Style table
-        style = TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), config.text_font_size),
-            ('PADDING', (0, 0), (-1, -1), 3),
-        ])
-
-        table.setStyle(style)
-        return [table, Spacer(1, config.spacing * inch)]
-
-    return []
+    return current_y
 
 
 @logger.catch
-def create_gene_page_pdf(
+def create_gene_page_pil(
     df: pd.DataFrame,
     gene_records: list[dict],
     config: PDFGeneratorConfig,
@@ -411,7 +329,7 @@ def create_gene_page_pdf(
     total_genes: int
 ) -> Path:
     """
-    Create individual PDF page for a specific gene with custom page size.
+    Create individual PDF page for a specific gene using PILLOW with high quality.
 
     Args:
         df: Verification table DataFrame
@@ -424,52 +342,201 @@ def create_gene_page_pdf(
     Returns:
         Path to generated PDF file for this gene
     """
-    # Calculate dynamic page size based on colony count
-    page_width, page_height = calculate_dynamic_page_size(gene_records, config)
+    # Calculate dynamic page height based on colony count
+    page_height = calculate_dynamic_page_height(gene_records, config)
 
-    # Create temporary PDF file for this gene
+    # Create temporary image for this gene
     gene_num = gene_records[0]['gene_num']
     gene_name = gene_records[0]['gene_name']
 
-    temp_output_path = config.output_base_path / f"temp_gene_{gene_num}_page_{page_index}.pdf"
+    temp_output_path = config.output_base_path / f"temp_gene_{gene_num}_page_{page_index}.png"
 
-    # Create document with custom page size
-    doc = SimpleDocTemplate(
-        str(temp_output_path),
-        pagesize=(page_width, page_height),
-        leftMargin=config.margin * inch,
-        rightMargin=config.margin * inch,
-        topMargin=config.margin * inch,
-        bottomMargin=config.margin * inch
+    # Create high quality image with white background
+    img = PILImage.new('RGB', (config.page_width, page_height), 'white')
+    draw = ImageDraw.Draw(img)
+
+    current_y = config.margin
+
+    # Draw title with proper spacing
+    title = f"Gene {gene_num} - {gene_name} (Round {round_name})"
+    draw.text((config.margin, current_y), title, fill="black", font=config.title_font)
+    current_y += int(0.25 * config.dpi)  # 0.25 inch spacing
+
+    # Draw summary
+    num_colonies = len(gene_records)
+    summary_text = f"Total Colonies: {num_colonies} | Page {page_index + 1} of {total_genes}"
+    draw.text((config.margin, current_y), summary_text, fill="black", font=config.header_font)
+    current_y += int(0.2 * config.dpi)  # 0.2 inch spacing
+
+    # Draw horizontal line for separation
+    line_y = current_y + int(0.05 * config.dpi)
+    draw.line(
+        [(config.margin, line_y), (config.page_width - config.margin, line_y)],
+        fill="black", width=1
+    )
+    current_y = line_y + int(0.1 * config.dpi)  # 0.1 inch spacing
+
+    # Define column structure: gene_info + 4 time_points + 5 replica_markers = 10 columns
+    time_point_columns = ['3d', '4d', '5d', '6d']
+    replica_columns = ['YES', 'HYG', 'NAT', 'LEU', 'ADE']
+    all_columns = ['Gene Info'] + time_point_columns + replica_columns
+
+    # Calculate column widths - distribute available width with better proportions
+    usable_width = config.page_width - 2 * config.margin
+    gene_info_width = int(3.0 * config.dpi)  # 3.0 inches for gene info
+    image_col_width = (usable_width - gene_info_width) // 9  # Remaining width for 9 image columns
+
+    # Calculate row height
+    gene_info_height = int(0.3 * config.dpi)  # 0.3 inches for gene info text
+    row_height = max(config.image_height, gene_info_height) + int(0.1 * config.dpi)  # Add padding
+
+    # Draw table headers with background
+    header_height = int(0.3 * config.dpi)
+    current_x = config.margin
+
+    # Draw header background
+    draw.rectangle(
+        [config.margin, current_y, config.page_width - config.margin, current_y + header_height],
+        fill="#f0f0f0"
     )
 
-    styles = create_pdf_styles(config)
+    # Draw header text centered in each column
+    for col_name in all_columns:
+        col_width = gene_info_width if col_name == 'Gene Info' else image_col_width
+        text_bbox = draw.textbbox((0, 0), col_name, font=config.header_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
 
-    # Build this page content
-    story = []
+        # Center text in column
+        text_x = current_x + (col_width - text_width) // 2
+        text_y = current_y + (header_height - text_height) // 2
 
-    # Add gene title
-    title = f"Gene {gene_num} - {gene_name} (Round {round_name})"
-    story.append(Paragraph(title, styles['title']))
-    story.append(Spacer(1, 0.25 * inch))
+        draw.text((text_x, text_y), col_name, fill="black", font=config.header_font)
+        current_x += col_width
 
-    # Add gene summary
-    num_colonies = len(gene_records)
-    summary_text = f"""
-    Gene: {gene_num} - {gene_name}<br/>
-    Total Colonies: {num_colonies}<br/>
-    Page {page_index + 1} of {total_genes}
-    """
-    story.append(Paragraph(summary_text, styles['gene_info']))
-    story.append(Spacer(1, 0.25 * inch))
+    current_y += header_height + config.border_width
 
-    # Create table for this gene
-    table_elements = create_pdf_table(styles, df, gene_records, config)
-    story.extend(table_elements)
+    # Draw table grid and content
+    for row_idx, record in enumerate(gene_records):
+        record_gene_num = record['gene_num']
+        record_gene_name = record['gene_name']
+        colony_id = record['colony_id']
+        date = record['date']
 
-    # Build this gene's page
-    doc.build(story)
+        # Find matching record in DataFrame for additional info
+        mask = (
+            (df['gene_num'] == record_gene_num) &
+            (df['gene_name'] == record_gene_name) &
+            (df['colony_id'] == colony_id) &
+            (df['date'] == date)
+        )
 
+        matching_records = df[mask]
+        if not matching_records.empty:
+            record_data = matching_records.iloc[0]
+            phenotype_category = record_data.get('phenotype_categories', 'N/A')
+            essentiality = record_data.get('gene_essentiality', 'N/A')
+        else:
+            phenotype_category = 'N/A'
+            essentiality = 'N/A'
+
+        # Draw row background (alternating colors for readability)
+        if row_idx % 2 == 0:
+            draw.rectangle(
+                [config.margin, current_y, config.page_width - config.margin, current_y + row_height],
+                fill="#fafafa"
+            )
+
+        # Draw gene info text with better formatting
+        gene_info_text = (
+            f"Gene: {record_gene_num} - {record_gene_name}\n"
+            f"Colony: {colony_id}, Date: {date}\n"
+            f"Category: {phenotype_category}\n"
+            f"Essentiality: {essentiality}"
+        )
+
+        # Draw gene info with proper padding
+        current_x = config.margin + config.cell_padding
+        current_y_inner = current_y + config.cell_padding
+        current_y_inner = draw_text_with_wrapping(
+            draw, gene_info_text, current_x, current_y_inner,
+            gene_info_width - 2 * config.cell_padding, config.text_font, config.line_spacing
+        )
+
+        # Draw vertical grid lines
+        current_x = config.margin + gene_info_width
+        draw.line(
+            [(current_x, current_y), (current_x, current_y + row_height)],
+            fill="gray", width=1
+        )
+
+        # Draw images for each column with centering
+        current_x = config.margin + gene_info_width
+        for column in time_point_columns + replica_columns:
+            # Draw vertical grid line before column
+            draw.line(
+                [(current_x, current_y), (current_x, current_y + row_height)],
+                fill="gray", width=1
+            )
+
+            image_path = get_image_for_gene_colony(df, record_gene_num, record_gene_name, colony_id, date, column)
+
+            if image_path and validate_image(image_path, config):
+                try:
+                    # Load and resize image with high quality
+                    with PILImage.open(image_path) as img_colony:
+                        # Ensure image has proper aspect ratio
+                        img_colony = img_colony.resize((image_col_width - 2*config.cell_padding, config.image_height), PILImage.Resampling.LANCZOS)
+
+                        # Center image in cell
+                        img_x = current_x + (image_col_width - img_colony.width) // 2
+                        img_y = current_y + (row_height - img_colony.height) // 2
+
+                        img.paste(img_colony, (img_x, img_y))
+                except Exception as e:
+                    logger.error(f"Error adding image {image_path}: {e}")
+                    # Draw "Error" text centered
+                    error_text = "Error"
+                    text_bbox = draw.textbbox((0, 0), error_text, font=config.text_font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    text_height = text_bbox[3] - text_bbox[1]
+                    text_x = current_x + (image_col_width - text_width) // 2
+                    text_y = current_y + (row_height - text_height) // 2
+                    draw.text((text_x, text_y), error_text, fill="red", font=config.text_font)
+            else:
+                # Draw "No Image" text centered
+                no_image_text = "No Image"
+                text_bbox = draw.textbbox((0, 0), no_image_text, font=config.text_font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+                text_x = current_x + (image_col_width - text_width) // 2
+                text_y = current_y + (row_height - text_height) // 2
+                draw.text((text_x, text_y), no_image_text, fill="#808080", font=config.text_font)
+
+            current_x += image_col_width
+
+        # Draw final vertical line
+        draw.line(
+            [(current_x, current_y), (current_x, current_y + row_height)],
+            fill="gray", width=1
+        )
+
+        # Draw horizontal line for row
+        draw.line(
+            [(config.margin, current_y + row_height), (config.page_width - config.margin, current_y + row_height)],
+            fill="gray", width=1
+        )
+
+        current_y += row_height
+
+    # Draw outer border
+    draw.rectangle(
+        [config.margin, config.margin, config.page_width - config.margin, current_y],
+        outline="black", width=2
+    )
+
+    # Save as high-quality PNG first (300 DPI)
+    img.save(temp_output_path, 'PNG', dpi=(config.dpi, config.dpi), quality=95)
     return temp_output_path
 
 
@@ -480,7 +547,7 @@ def create_verification_pdf(
     round_name: str
 ) -> Path:
     """
-    Generate verification PDF for a specific round using dynamic page sizing per gene.
+    Generate verification PDF for a specific round using PILLOW.
 
     Args:
         df: Verification table DataFrame
@@ -499,8 +566,6 @@ def create_verification_pdf(
 
     # Create unique gene-colony combinations and sort by gene_num then colony_id
     unique_records = df[['gene_num', 'gene_name', 'colony_id', 'date']].drop_duplicates()
-
-    # Sort by gene_num first, then by colony_id for proper grouping
     unique_records = sort_dataframe_by_gene_and_colony(unique_records)
 
     # Group by gene_num - one page per gene
@@ -529,70 +594,56 @@ def create_verification_pdf(
     if current_gene_records:
         gene_groups.append(current_gene_records)
 
-    logger.info(f"Creating PDF with {len(gene_groups)} dynamically-sized pages for round {round_name}")
+    logger.info(f"Creating PDF with {len(gene_groups)} pages for round {round_name}")
 
-    # Create individual PDF pages for each gene
-    temp_pdf_files = []
+    # Create individual PNG pages for each gene
+    temp_png_files = []
     total_genes = len(gene_groups)
 
     for i, gene_group in enumerate(gene_groups):
         logger.info(f"Creating page {i + 1}/{total_genes} for gene {gene_group[0]['gene_num']} ({len(gene_group)} colonies)")
 
         try:
-            temp_pdf_path = create_gene_page_pdf(
+            temp_png_path = create_gene_page_pil(
                 df, gene_group, config, round_name, i, total_genes
             )
-            temp_pdf_files.append(temp_pdf_path)
+            temp_png_files.append(temp_png_path)
         except Exception as e:
             logger.error(f"Error creating PDF page for gene {gene_group[0]['gene_num']}: {e}")
             continue
 
-    # Merge all individual PDF pages into final document
-    if temp_pdf_files:
+    # Convert PNGs to PDF if we have files
+    if temp_png_files:
         try:
-            # Try PyPDF2 first (preferred)
-            try:
-                from PyPDF2 import PdfMerger
-                use_pypdf2 = True
-            except ImportError:
-                logger.warning("PyPDF2 not available. Using simple PDF concatenation method")
-                use_pypdf2 = False
+            # Convert all PNGs to RGB if needed and ensure high quality
+            rgb_images = []
+            for png_path in temp_png_files:
+                img = PILImage.open(png_path)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                rgb_images.append(img)
 
-            if use_pypdf2:
-                merger = PdfMerger()
+            # Save as high-quality multipage PDF with proper DPI
+            rgb_images[0].save(
+                output_path,
+                "PDF",
+                resolution=config.dpi,  # Use configured DPI (300)
+                save_all=True,
+                append_images=rgb_images[1:],
+                quality=95  # Maximum quality
+            )
 
-                # Add all temporary PDFs
-                for temp_pdf in temp_pdf_files:
-                    merger.append(str(temp_pdf))
+            # Clean up temporary files
+            for temp_png in temp_png_files:
+                temp_png.unlink(missing_ok=True)
 
-                # Write final merged PDF
-                merger.write(str(output_path))
-                merger.close()
-
-                # Clean up temporary files
-                for temp_pdf in temp_pdf_files:
-                    temp_pdf.unlink(missing_ok=True)
-
-                logger.success(f"Generated verification PDF with dynamic page sizing: {output_path}")
-            else:
-                # Fallback: just copy the first PDF as single gene example
-                logger.warning("Multiple gene pages created but cannot merge without PyPDF2")
-                logger.info(f"Individual gene PDFs available in: {config.output_base_path}")
-                logger.info("Install PyPDF2 with: pip install PyPDF2 to merge into single document")
-
-                # Copy first PDF as the main document with different name
-                if temp_pdf_files:
-                    first_pdf = temp_pdf_files[0]
-                    output_path_single = config.output_base_path / f"round_{round_name}_gene_{gene_groups[0][0]['gene_num']}_example.pdf"
-                    import shutil
-                    shutil.copy2(first_pdf, output_path_single)
-                    logger.info(f"Example gene PDF created: {output_path_single}")
+            logger.success(f"Generated high-quality verification PDF using PILLOW: {output_path}")
 
         except Exception as e:
-            logger.error(f"Error processing PDFs: {e}")
-            logger.info(f"Individual gene PDFs remain available in: {config.output_base_path}")
+            logger.error(f"Error creating PDF with PILLOW: {e}")
+            logger.info(f"Individual PNG files remain available in: {config.output_base_path}")
     else:
-        logger.warning("No PDF pages created to merge")
+        logger.warning("No PDF pages created")
 
     return output_path
 
