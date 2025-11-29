@@ -4,6 +4,7 @@ Creates comprehensive data tables with image metadata and biological context.
 """
 
 import sys
+import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -105,7 +106,7 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
     # Configure round paths
     round_config = roundConfig(
         round_folder_name=round_name,
-        raw_data_folder_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion"),
+        raw_data_folder_path=config.processed_data_base_path,
         output_folder_path=config.processed_data_base_path
     )
 
@@ -142,9 +143,15 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
     # Convert to DataFrame
     df_images = pd.DataFrame(all_image_data)
 
+    # Convert gene_num to int for proper sorting, but keep original for lookup
+    df_images['gene_num_int'] = df_images['gene_num'].astype(int)
+
     # Create pivot table structure as specified in PROMPT.md
+    # Sort by gene_num as integer first
+    df_images_sorted = df_images.sort_values('gene_num_int')
+
     # Group by gene and colony
-    grouped = df_images.groupby(["gene_num", "gene_name", "colony_id", "date"])
+    grouped = df_images_sorted.groupby(["gene_num", "gene_name", "colony_id", "date"])
 
     verification_records = []
 
@@ -186,20 +193,78 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
 
         verification_records.append(record)
 
-    return pd.DataFrame(verification_records)
+    df = pd.DataFrame(verification_records)
+
+    # Sort final DataFrame by gene_num as integer to ensure proper ordering
+    df['gene_num_int'] = df['gene_num'].astype(int)
+    df = df.sort_values('gene_num_int').drop(columns=['gene_num_int'])
+
+    return df
 
 
 @logger.catch
-def export_tables(df: pd.DataFrame, config: TableOrganizerConfig, round_name: str):
+def export_single_excel(all_rounds_data: dict[str, pd.DataFrame], config: TableOrganizerConfig):
+    """
+    Export all rounds to a single Excel file with multiple sheets.
+
+    Args:
+        all_rounds_data: Dictionary with round names as keys and DataFrames as values
+        config: Table organizer configuration
+    """
+    output_file = config.output_base_path / "all_rounds_verification_summary.xlsx"
+
+    # Create summary statistics
+    summary_data = []
+    for round_name, df in all_rounds_data.items():
+        if not df.empty:
+            total_records = len(df)
+            complete_time_series = len(df.dropna(subset=['3d_image_path', '4d_image_path', '5d_image_path', '6d_image_path'], how='all'))
+            complete_replicas = len(df.dropna(subset=['YES_image_path', 'HYG_image_path', 'NAT_image_path', 'LEU_image_path', 'ADE_image_path'], how='all'))
+
+            summary_data.append({
+                'Round': round_name,
+                'Total Records': total_records,
+                'Complete Time Series': complete_time_series,
+                'Complete Replicas': complete_replicas,
+                'Time Series Completion %': (complete_time_series / total_records * 100) if total_records > 0 else 0,
+                'Replica Completion %': (complete_replicas / total_records * 100) if total_records > 0 else 0
+            })
+
+    summary_df = pd.DataFrame(summary_data)
+
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        # Add summary sheet first
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+
+        # Add each round as a separate sheet
+        for round_name, df in all_rounds_data.items():
+            if not df.empty:
+                # Sheet names have a 31 character limit in Excel
+                sheet_name = round_name[:31]
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                logger.info(f"Added sheet '{sheet_name}' with {len(df)} records")
+
+    logger.success(f"All rounds exported to single Excel file: {output_file}")
+    return output_file
+
+
+@logger.catch
+def export_tables(df: pd.DataFrame, config: TableOrganizerConfig, round_name: str, all_rounds_data: dict[str, pd.DataFrame] | None = None):
     """
     Export verification table and quality reports in specified formats.
 
     Args:
         df: Verification table DataFrame
-        quality_reports: Dictionary of quality report DataFrames
         config: Table organizer configuration
         round_name: Name of the experimental round
+        all_rounds_data: Dictionary of all rounds data for single Excel export (optional)
     """
+    # If we have all rounds data, export to single Excel file
+    if all_rounds_data is not None:
+        export_single_excel(all_rounds_data, config)
+        return
+
+    # Legacy individual round export
     round_output_path = config.output_base_path / round_name
     round_output_path.mkdir(parents=True, exist_ok=True)
 
@@ -229,6 +294,8 @@ def process_round_tables(config: TableOrganizerConfig, round_name: str):
         config: Table organizer configuration
         round_name: Name of the experimental round to process
     """
+    logger.info("")
+    logger.info("-" * 40)
     logger.info(f"Starting table organization for round: {round_name}")
 
     # Create verification table
@@ -250,7 +317,7 @@ def process_round_tables(config: TableOrganizerConfig, round_name: str):
 @logger.catch
 def process_all_rounds(config: TableOrganizerConfig):
     """
-    Process tables for all available experimental rounds.
+    Process tables for all available experimental rounds and export to single Excel file.
 
     Args:
         config: Table organizer configuration
@@ -263,20 +330,54 @@ def process_all_rounds(config: TableOrganizerConfig):
         return
 
     round_folders = [d for d in base_data_path.iterdir() if d.is_dir()]
-    round_names = [f.name for f in round_folders if f.name.startswith("round_")]
+    round_names = [f.name for f in round_folders]
 
     if not round_names:
         logger.error("No round directories found")
         return
 
-    logger.info(f"Found {len(round_names)} rounds to process: {round_names}")
-
-    for round_name in sorted(round_names):
+    def extract_round_number(round_name: str) -> int:
+        """Extract numeric value from round name for proper sorting."""
         try:
-            process_round_tables(config, round_name)
+            # Handle various round name formats: "1st_round", "2nd_round", "3rd_round", "4th_round", etc.
+            match = re.search(r'(\d+)', round_name)
+            return int(match.group(1)) if match else 0
+        except Exception:
+            return 0
+
+    # Sort rounds by numeric value instead of alphabetical
+    sorted_round_names = sorted(round_names, key=extract_round_number)
+
+    logger.info(f"Found {len(round_names)} rounds to process:")
+    for round_name in sorted_round_names:
+        logger.info(f" - {round_name}")
+
+    # Collect all rounds data for single Excel export
+    all_rounds_data = {}
+    total_records = 0
+
+    for round_name in sorted_round_names:
+        try:
+            # Create verification table for this round
+            df = create_verification_table(config, round_name)
+
+            if not df.empty:
+                all_rounds_data[round_name] = df
+                total_records += len(df)
+                logger.info(f"Created verification table for {round_name} with {len(df)} records")
+            else:
+                logger.warning(f"No data found for round {round_name}")
+
         except Exception as e:
             logger.error(f"Error processing round {round_name}: {e}")
             continue
+
+    # Export all rounds to single Excel file if we have data
+    if all_rounds_data:
+        logger.info(f"Exporting {total_records} total records from {len(all_rounds_data)} rounds to single Excel file")
+        export_single_excel(all_rounds_data, config)
+    else:
+        logger.error("No valid data found for any rounds")
 
     logger.success("Completed table organization for all rounds")
 

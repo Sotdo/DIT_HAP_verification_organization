@@ -14,12 +14,10 @@ sys.path.append(str(Path(__file__).parent.parent / "src"))
 from table_organizer import (
     TableOrganizerConfig,
     process_all_rounds as process_table_rounds,
-    create_sample_table_for_testing
 )
 from pdf_generator import (
     PDFGeneratorConfig,
     generate_round_pdfs as generate_pdf_rounds,
-    create_sample_table_for_testing as create_pdf_sample
 )
 
 
@@ -32,7 +30,7 @@ class OrganizeTablesConfig:
         "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
     )
     output_base_path: Path = Path(
-        "./results/"
+        "../results/"
     )
 
     # Table organization configuration
@@ -42,7 +40,7 @@ class OrganizeTablesConfig:
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
             output_base_path=Path(
-                "./results"
+                "../results"
             )
         )
     )
@@ -54,7 +52,7 @@ class OrganizeTablesConfig:
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
             output_base_path=Path(
-                "./results/merged_pdfs"
+                "../results/merged_pdfs"
             )
         )
     )
@@ -153,9 +151,9 @@ def verify_prerequisites(config: OrganizeTablesConfig) -> bool:
 
     # Check for required resource files
     resource_files = [
-        config.processed_data_base_path.parent.parent / "resource" / "all_for_verification_genes_by_round.xlsx",
-        config.processed_data_base_path.parent.parent / "resource" / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
-        config.processed_data_base_path.parent.parent / "resource" / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
+        Path("../resource") / "all_for_verification_genes_by_round.xlsx",
+        Path("../resource") / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
+        Path("../resource") / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
     ]
 
     for resource_file in resource_files:
@@ -189,8 +187,8 @@ def setup_logging(config: OrganizeTablesConfig):
     logger.add(
         sys.stdout,
         colorize=True,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20} | {message}",
-        level="INFO"
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{module:<20}</cyan>:{line:<4} | <level>{message}</level>",
+        level="DEBUG"
     )
 
     # Add file logging
