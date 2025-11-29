@@ -32,22 +32,22 @@ class PDFGeneratorConfig:
     dpi: int = 300  # Dots per inch for high quality
     page_width_inches: float = 11.69  # A4 landscape width in inches
     page_height_base: float = 8.27  # A4 landscape height in inches (base, will be extended)
-    margin_inches: float = 0.5  # margin in inches
+    margin_inches: float = 1  # margin in inches
 
     # Convert to pixels for PILLOW
     page_width: int = int(11.69 * dpi)  # A4 landscape width at 300 DPI
-    margin: int = int(0.5 * dpi)  # margin in pixels
+    margin: int = int(1 * dpi)  # margin in pixels
 
     # Image sizes in pixels (high resolution)
     image_width: int = int(1.0 * dpi)  # 1 inch width at 300 DPI = 300 pixels
     image_height: int = int(0.4 * dpi)  # 0.4 inch height at 300 DPI = 120 pixels
     cell_padding: int = int(0.05 * dpi)  # 0.05 inch padding = 15 pixels
     border_width: int = 1  # border width in pixels
-    spacing: int = int(0.1 * dpi)  # spacing between elements in pixels
+    spacing: int = int(0.2 * dpi)  # spacing between elements in pixels
 
     # Text settings (optimized for high DPI)
     title_font_size_pt: int = 16  # points
-    header_font_size_pt: int = 12  # points
+    header_font_size_pt: int = 16  # points
     text_font_size_pt: int = 9  # points
 
     # Convert points to pixels for PILLOW (72 points per inch, but we scale for DPI)
@@ -57,12 +57,12 @@ class PDFGeneratorConfig:
     line_spacing: int = int((10 / 72) * dpi)  # 10 points line spacing
 
     # Grid line styling
-    grid_line_width: int = 1  # pixels for consistent grid lines
+    grid_line_width: int = 2  # pixels for consistent grid lines
     grid_line_color: str = "#333333"  # Dark gray for clear visibility
-    outer_border_width: int = 2  # pixels for outer border
+    outer_border_width: int = 3  # pixels for outer border
     outer_border_color: str = "#000000"  # Black for outer border
 
-    max_rows_per_page: int = 4  # 4 rows per page
+    max_rows_per_page: int = 10  # 4 rows per page
 
     # Quality thresholds for image inclusion
     min_image_width: int = 100
@@ -245,21 +245,21 @@ def calculate_dynamic_page_height(
         Height in pixels
     """
     # Base height for header, summary, and spacing (in pixels at 300 DPI)
-    base_height = int(2.0 * config.dpi)  # 2 inches for title + summary
+    base_height = int(3 * config.dpi)  # 2 inches for title + summary
 
     # Height per row: image height + gene info text + padding + borders
-    gene_info_height = int(0.3 * config.dpi)  # 0.3 inches for gene info text
+    gene_info_height = int(0.5 * config.dpi)  # 0.3 inches for gene info text
     row_height = max(
         config.image_height,
         gene_info_height
-    ) + int(0.15 * config.dpi)  # Add padding between rows
+    ) + int(0.3 * config.dpi)  # Add padding between rows
 
     # Calculate height based on number of colonies
     num_colonies = len(gene_records)
     content_height = row_height * num_colonies
 
     # Add header row
-    header_height = int(0.2 * config.dpi)  # 0.2 inches for table headers
+    header_height = int(0.4 * config.dpi)  # 0.2 inches for table headers
 
     # Total height
     total_height = base_height + header_height + content_height + int(0.5 * config.dpi)  # Extra spacing
@@ -468,6 +468,16 @@ def create_gene_page_pil(
         else:
             phenotype_category = 'N/A'
             essentiality = 'N/A'
+
+        # Handle nan/float values and convert to strings
+        if pd.isna(phenotype_category) or phenotype_category != phenotype_category:  # nan check
+            phenotype_category = 'N/A'
+        if pd.isna(essentiality) or essentiality != essentiality:  # nan check
+            essentiality = 'N/A'
+
+        # Ensure values are strings
+        phenotype_category = str(phenotype_category)
+        essentiality = str(essentiality)
 
         # Draw row background (alternating colors for readability)
         if row_idx % 2 == 0:
