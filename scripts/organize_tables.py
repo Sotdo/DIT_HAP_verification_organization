@@ -12,7 +12,7 @@ from loguru import logger
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
 from table_organizer import (
-    TableOrganizerConfig,
+    TableConfig,
     process_all_rounds as process_table_rounds,
 )
 from pdf_generator import (
@@ -34,12 +34,12 @@ class OrganizeTablesConfig:
     )
 
     # Table organization configuration
-    table_config: TableOrganizerConfig = field(
-        default_factory=lambda: TableOrganizerConfig(
-            processed_data_base_path=Path(
+    table_config: TableConfig = field(
+        default_factory=lambda: TableConfig(
+            base_path=Path(
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
-            output_base_path=Path(
+            output_path=Path(
                 "../results"
             )
         )
@@ -58,19 +58,20 @@ class OrganizeTablesConfig:
     )
 
     # Processing options
-    process_tables: bool = True
-    generate_pdfs: bool = False
+    process_tables: bool = False
+    generate_pdfs: bool = True
     create_samples: bool = False
     rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
 
     def __post_init__(self):
         # Ensure output directories exist
-        self.table_config.output_base_path.mkdir(parents=True, exist_ok=True)
+        self.table_config.output_path.mkdir(parents=True, exist_ok=True)
         self.pdf_config.output_base_path.mkdir(parents=True, exist_ok=True)
 
         # Set base paths in sub-configurations
-        self.table_config.processed_data_base_path = self.processed_data_base_path
+        self.table_config.base_path = self.processed_data_base_path
         self.pdf_config.processed_data_base_path = self.processed_data_base_path
+        self.pdf_config.table_structures_path = self.table_config.output_path
 
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
@@ -84,7 +85,7 @@ def process_tables(config: OrganizeTablesConfig):
         for round_name in config.rounds_to_process:
             try:
                 from table_organizer import process_round_tables
-                process_round_tables(config.table_config, round_name)
+                process_round_tables(round_name, config.table_config)
             except Exception as e:
                 logger.error(f"Error processing tables for round {round_name}: {e}")
     else:
@@ -115,12 +116,13 @@ def create_sample_data(config: OrganizeTablesConfig):
     logger.info("Creating sample data for testing...")
 
     # Create sample table data
-    sample_table_file = create_sample_table_for_testing(config.table_config, "1st_round")
+    from pdf_generator import create_sample_table_for_testing
+    sample_table_file = create_sample_table_for_testing(config.pdf_config, "1st_round")
     logger.info(f"Created sample table: {sample_table_file}")
 
-    # Create sample PDF data
-    sample_pdf_file = create_pdf_sample(config.pdf_config, "1st_round")
-    logger.info(f"Created sample PDF data: {sample_pdf_file}")
+    # Create sample PDF data (using the sample table that was just created)
+    # PDF will be generated from the sample table data
+    logger.info("Sample PDF data ready for generation from sample table")
 
 
 @logger.catch
@@ -151,9 +153,9 @@ def verify_prerequisites(config: OrganizeTablesConfig) -> bool:
 
     # Check for required resource files
     resource_files = [
-        Path("../resource") / "all_for_verification_genes_by_round.xlsx",
-        Path("../resource") / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
-        Path("../resource") / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
+        Path("resource") / "all_for_verification_genes_by_round.xlsx",
+        Path("resource") / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
+        Path("resource") / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
     ]
 
     for resource_file in resource_files:
@@ -165,7 +167,7 @@ def verify_prerequisites(config: OrganizeTablesConfig) -> bool:
 
     # Check for table structures if generating PDFs
     if config.generate_pdfs:
-        table_structures_dir = config.table_config.output_base_path
+        table_structures_dir = config.table_config.output_path
         if not table_structures_dir.exists():
             if config.process_tables:
                 logger.warning("Table structures directory not found, will be created during table processing")
