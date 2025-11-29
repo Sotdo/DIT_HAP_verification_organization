@@ -153,9 +153,9 @@ def verify_prerequisites(config: OrganizeTablesConfig) -> bool:
 
     # Check for required resource files
     resource_files = [
-        Path("resource") / "all_for_verification_genes_by_round.xlsx",
-        Path("resource") / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
-        Path("resource") / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
+        Path("../resource") / "all_for_verification_genes_by_round.xlsx",
+        Path("../resource") / "gene_IDs_names_products" / "20251001_gene_IDs_names_products.tsv",
+        Path("../resource") / "Hayles_2013_OB_merged_categories_sysIDupdated.xlsx"
     ]
 
     for resource_file in resource_files:
