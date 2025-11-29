@@ -32,7 +32,7 @@ class OrganizeTablesConfig:
         "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
     )
     output_base_path: Path = Path(
-        "/hugedata/YushengYang/DIT_HAP_verification/data/organized_tables/DIT_HAP_deletion"
+        "./results/"
     )
 
     # Table organization configuration
@@ -42,7 +42,7 @@ class OrganizeTablesConfig:
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
             output_base_path=Path(
-                "/hugedata/YushengYang/DIT_HAP_verification/data/organized_tables/DIT_HAP_deletion"
+                "./results"
             )
         )
     )
@@ -54,14 +54,14 @@ class OrganizeTablesConfig:
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
             output_base_path=Path(
-                "/hugedata/YushengYang/DIT_HAP_verification/data/merged_pdfs/DIT_HAP_deletion"
+                "./results/merged_pdfs"
             )
         )
     )
 
     # Processing options
     process_tables: bool = True
-    generate_pdfs: bool = True
+    generate_pdfs: bool = False
     create_samples: bool = False
     rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
 

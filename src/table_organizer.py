@@ -6,13 +6,12 @@ Creates comprehensive data tables with image metadata and biological context.
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Optional
 import pandas as pd
 from loguru import logger
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent))
-
 from utils import verificationMetadata, roundConfig
 
 
@@ -22,7 +21,7 @@ class TableOrganizerConfig:
     """Configuration for table organization and metadata extraction."""
     # Input/output paths
     processed_data_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion")
-    output_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/table_structures/DIT_HAP_deletion")
+    output_base_path: Path = Path("../results")
 
     # Quality assessment parameters
     min_colony_count: int = 1           # Minimum colonies expected in image
@@ -31,7 +30,7 @@ class TableOrganizerConfig:
     max_image_size: tuple[int, int] = (2000, 2000)  # Maximum image dimensions
 
     # Export formats
-    export_formats: list[str] = None  # None means export to all available formats
+    export_formats: list[str] | None = None  # None means export to all available formats
 
     def __post_init__(self):
         if self.export_formats is None:
@@ -42,61 +41,6 @@ class TableOrganizerConfig:
 
 
 # %% ------------------------------------ Quality Assessment ------------------------------------ #
-@logger.catch
-def assess_image_quality(image_path: Path) -> Dict[str, Union[float, int, bool]]:
-    """
-    Assess image quality metrics for cropped images.
-
-    Args:
-        image_path: Path to image file
-
-    Returns:
-        Dictionary containing quality metrics
-    """
-    try:
-        import cv2
-        import numpy as np
-
-        # Load image
-        img = cv2.imread(str(image_path))
-        if img is None:
-            return {"valid": False, "error": "Could not load image"}
-
-        height, width = img.shape[:2]
-
-        # Calculate basic metrics
-        file_size_mb = image_path.stat().st_size / (1024 * 1024)
-
-        # Convert to grayscale for quality analysis
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Contrast metric (standard deviation)
-        contrast = float(np.std(gray))
-
-        # Sharpness metric (Laplacian variance)
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        sharpness = float(np.var(laplacian))
-
-        # Noise estimation (high-frequency content)
-        blur_kernel = np.ones((3, 3), np.float32) / 9
-        blurred = cv2.filter2D(gray, -1, blur_kernel)
-        noise_level = float(np.mean(np.abs(gray.astype(float) - blurred)))
-
-        return {
-            "valid": True,
-            "width": width,
-            "height": height,
-            "file_size_mb": file_size_mb,
-            "contrast": contrast,
-            "sharpness": sharpness,
-            "noise_level": noise_level
-        }
-
-    except Exception as e:
-        logger.error(f"Error assessing image quality for {image_path}: {e}")
-        return {"valid": False, "error": str(e)}
-
-
 @logger.catch
 def extract_image_metadata(image_path: Path, config: TableOrganizerConfig) -> Optional[dict]:
     """
@@ -111,7 +55,7 @@ def extract_image_metadata(image_path: Path, config: TableOrganizerConfig) -> Op
     """
     try:
         # Parse systematic filename: gene_num_gene_name_day_or_marker_colony_id_date.png
-        stem = image_path.stem
+        stem = image_path.stem.removesuffix(".cropped")
         parts = stem.split('_')
 
         if len(parts) < 5:
@@ -128,18 +72,6 @@ def extract_image_metadata(image_path: Path, config: TableOrganizerConfig) -> Op
         replica_markers = ["YES", "HYG", "NAT", "LEU", "ADE"]
         is_replica = day_or_marker in replica_markers
 
-        # Quality assessment
-        quality = assess_image_quality(image_path)
-        if not quality.get("valid", False):
-            logger.warning(f"Skipping invalid image: {image_path}")
-            return None
-
-        # Validate quality metrics
-        dimensions = (quality["width"], quality["height"])
-        if dimensions < config.min_image_size or dimensions > config.max_image_size:
-            logger.warning(f"Image dimensions out of range: {image_path}")
-            return None
-
         return {
             "gene_num": gene_num,
             "gene_name": gene_name,
@@ -148,12 +80,6 @@ def extract_image_metadata(image_path: Path, config: TableOrganizerConfig) -> Op
             "date": date_str,
             "is_replica": is_replica,
             "image_path": str(image_path),
-            "file_size_mb": round(quality["file_size_mb"], 3),
-            "image_width": quality["width"],
-            "image_height": quality["height"],
-            "contrast": round(quality["contrast"], 2),
-            "sharpness": round(quality["sharpness"], 2),
-            "noise_level": round(quality["noise_level"], 3)
         }
 
     except Exception as e:
@@ -207,7 +133,6 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
             if metadata:
                 # Add round and subfolder information
                 metadata["round"] = round_name
-                metadata["subfolder"] = subfolder_name
                 all_image_data.append(metadata)
 
     if not all_image_data:
@@ -223,7 +148,7 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
 
     verification_records = []
 
-    for (gene_num, gene_name, colony_id, date), group in grouped:
+    for (gene_num, gene_name, colony_id, date_str), group in grouped:
         # Get verification metadata for this gene
         gene_info = verification_meta.verification_genes[
             verification_meta.verification_genes["Num"] == int(gene_num)
@@ -256,14 +181,8 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
             # Map to appropriate column
             if day_or_marker in ["3d", "4d", "5d", "6d"]:
                 record[f"{day_or_marker}_image_path"] = image_path
-                record[f"{day_or_marker}_file_size_mb"] = row["file_size_mb"]
-                record[f"{day_or_marker}_contrast"] = row["contrast"]
-                record[f"{day_or_marker}_sharpness"] = row["sharpness"]
             elif day_or_marker in ["YES", "HYG", "NAT", "LEU", "ADE"]:
                 record[f"{day_or_marker}_image_path"] = image_path
-                record[f"{day_or_marker}_file_size_mb"] = row["file_size_mb"]
-                record[f"{day_or_marker}_contrast"] = row["contrast"]
-                record[f"{day_or_marker}_sharpness"] = row["sharpness"]
 
         verification_records.append(record)
 
@@ -271,109 +190,7 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
 
 
 @logger.catch
-def generate_quality_report(df: pd.DataFrame, config: TableOrganizerConfig, round_name: str) -> dict:
-    """
-    Generate quality assessment reports.
-
-    Args:
-        df: Verification table DataFrame
-        config: Table organizer configuration
-        round_name: Name of the experimental round
-
-    Returns:
-        Dictionary containing quality report DataFrames
-    """
-    reports = {}
-
-    # Overall statistics
-    total_records = len(df)
-    records_with_all_timepoints = df[
-        df[["3d_image_path", "4d_image_path", "5d_image_path", "6d_image_path"]].notna().all(axis=1)
-    ]
-
-    summary_stats = pd.DataFrame([
-        {
-            "metric": "Total gene records",
-            "count": total_records,
-            "percentage": 100.0
-        },
-        {
-            "metric": "Records with all time points",
-            "count": len(records_with_all_timepoints),
-            "percentage": (len(records_with_all_timepoints) / total_records * 100) if total_records > 0 else 0
-        },
-        {
-            "metric": "Records with replica data",
-            "count": len(df[df[["YES_image_path", "HYG_image_path", "NAT_image_path", "LEU_image_path", "ADE_image_path"]].notna().any(axis=1)],
-            "percentage": (len(df[df[["YES_image_path", "HYG_image_path", "NAT_image_path", "LEU_image_path", "ADE_image_path"]].notna().any(axis=1)]) / total_records * 100) if total_records > 0 else 0
-        }
-    ])
-
-    reports["summary"] = summary_stats
-
-    # Image quality metrics by time point
-    quality_columns = []
-    for timepoint in ["3d", "4d", "5d", "6d", "YES", "HYG", "NAT", "LEU", "ADE"]:
-        quality_columns.extend([
-            f"{timepoint}_file_size_mb",
-            f"{timepoint}_contrast",
-            f"{timepoint}_sharpness"
-        ])
-
-    # Calculate quality statistics
-    quality_data = []
-    for timepoint in ["3d", "4d", "5d", "6d", "YES", "HYG", "NAT", "LEU", "ADE"]:
-        size_col = f"{timepoint}_file_size_mb"
-        contrast_col = f"{timepoint}_contrast"
-        sharpness_col = f"{timepoint}_sharpness"
-
-        if size_col in df.columns:
-            valid_sizes = df[size_col].dropna()
-            if len(valid_sizes) > 0:
-                quality_data.append({
-                    "timepoint": timepoint,
-                    "metric": "File Size (MB)",
-                    "mean": valid_sizes.mean(),
-                    "std": valid_sizes.std(),
-                    "min": valid_sizes.min(),
-                    "max": valid_sizes.max(),
-                    "count": len(valid_sizes)
-                })
-
-        if contrast_col in df.columns:
-            valid_contrast = df[contrast_col].dropna()
-            if len(valid_contrast) > 0:
-                quality_data.append({
-                    "timepoint": timepoint,
-                    "metric": "Contrast",
-                    "mean": valid_contrast.mean(),
-                    "std": valid_contrast.std(),
-                    "min": valid_contrast.min(),
-                    "max": valid_contrast.max(),
-                    "count": len(valid_contrast)
-                })
-
-        if sharpness_col in df.columns:
-            valid_sharpness = df[sharpness_col].dropna()
-            if len(valid_sharpness) > 0:
-                quality_data.append({
-                    "timepoint": timepoint,
-                    "metric": "Sharpness",
-                    "mean": valid_sharpness.mean(),
-                    "std": valid_sharpness.std(),
-                    "min": valid_sharpness.min(),
-                    "max": valid_sharpness.max(),
-                    "count": len(valid_sharpness)
-                })
-
-    if quality_data:
-        reports["quality_metrics"] = pd.DataFrame(quality_data)
-
-    return reports
-
-
-@logger.catch
-def export_tables(df: pd.DataFrame, quality_reports: Dict[str, pd.DataFrame], config: TableOrganizerConfig, round_name: str):
+def export_tables(df: pd.DataFrame, config: TableOrganizerConfig, round_name: str):
     """
     Export verification table and quality reports in specified formats.
 
@@ -393,11 +210,6 @@ def export_tables(df: pd.DataFrame, quality_reports: Dict[str, pd.DataFrame], co
         elif format_type == "xlsx":
             with pd.ExcelWriter(round_output_path / f"{round_name}_verification_table.xlsx", engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name='Verification Data', index=False)
-
-                # Add quality reports as separate sheets
-                for report_name, report_df in quality_reports.items():
-                    if not report_df.empty:
-                        report_df.to_excel(writer, sheet_name=f'Quality_{report_name}', index=False)
 
         elif format_type == "json":
             df.to_json(round_output_path / f"{round_name}_verification_table.json", orient='records', indent=2)
@@ -428,11 +240,9 @@ def process_round_tables(config: TableOrganizerConfig, round_name: str):
 
     logger.info(f"Created verification table with {len(df)} records")
 
-    # Generate quality reports
-    quality_reports = generate_quality_report(df, config, round_name)
 
     # Export tables and reports
-    export_tables(df, quality_reports, config, round_name)
+    export_tables(df, config, round_name)
 
     logger.success(f"Completed table organization for round {round_name}")
 

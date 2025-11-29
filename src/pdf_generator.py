@@ -6,7 +6,7 @@ Creates formatted PDF documents compiling cropped images with metadata.
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import Optional
 import pandas as pd
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
@@ -58,7 +58,7 @@ class PDFGeneratorConfig:
 
 # %% ------------------------------------ Helper Functions ------------------------------------ #
 @logger.catch
-def get_page_dimensions(config: PDFGeneratorConfig) -> Tuple[float, float]:
+def get_page_dimensions(config: PDFGeneratorConfig) -> tuple[float, float]:
     """Get usable page dimensions in inches."""
     usable_width = (config.page_width - 2 * config.margin * inch) / inch
     usable_height = (config.page_height - 2 * config.margin * inch) / inch
@@ -190,7 +190,7 @@ def create_gene_info_row(
     gene_name: str,
     colony_id: str,
     date: str
-) -> List[str]:
+) -> list[str]:
     """
     Create gene information row for PDF table.
 
@@ -232,9 +232,9 @@ def create_gene_info_row(
 @logger.catch
 def create_pdf_page(
     doc: SimpleDocTemplate,
-    styles: Dict,
+    styles: dict,
     df: pd.DataFrame,
-    gene_records: List[Dict],
+    gene_records: list[dict],
     config: PDFGeneratorConfig
 ):
     """
