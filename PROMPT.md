@@ -185,6 +185,7 @@ Raw Data Structure:
     - LEU_image_path
     - ADE_image_path
   - Some of the images may be missing part of the images, so the corresponding image_path column can be empty.
+  - The table is saved as a excel file in results/ with the naming convention: `all_rounds_verification_summary.xlsx`
 
 3. **PDF Generation**:
   - For each round, generate a PDF document compiling all cropped images
