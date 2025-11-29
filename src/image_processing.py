@@ -20,46 +20,169 @@ Usage:
     )
 """
 
-import sys
+
+# %% ------------------------------------ Imports ------------------------------------ #
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any, Union
 from dataclasses import dataclass
+from loguru import logger
 
 import cv2
 import numpy as np
 from tqdm import tqdm
 from utils import roundConfig
 
-# %% ------------------------------------ Functions ------------------------------------ #
+# %% ------------------------------------ Constants ------------------------------------ #
+REPLICA_PLATES_ORDER = {
+    0: "YES",
+    1: "HYG",
+    2: "NAT",
+    3: "LEU",
+    4: "ADE"
+}
 
+REPLICA_NAME = "YHZAY2A"
+
+# %% ------------------------------------ Dataclass ------------------------------------ #
+@dataclass
+class ImageProcessingConfig:
+    """Configuration for image processing."""
+    # Tetrad parameters
+    target_radius: int = 490  # plate radius in pixels
+    height_range: tuple[int, int] = (45, 80)
+    width_range: tuple[int, int] = (10, 90)
+    final_height_percent: int = 30
+    final_width_percent: int = 75
+    visualize_colonies: bool = True
+    adaptive_thresh_c: int = 2
+    max_centroid_deviation_px: int | None = 75
+    min_colony_size: int = 50 # minimum colony size in pixels, 50 for tetrads, 100 for replicas
+    circularity_threshold: float = 0.7 # circularity threshold for colony detection, 0.7 for tetrads, 0.5 for replicas
+    adaptive_block_size: int = 30 # must be odd number, 30 for tetrads, 120 for replicas
+    contrast_alpha: float = 1.0 # contrast adjustment factor, 1.0 for tetrads, 1.5 for replicas
+
+# %% ------------------------------------ Functions ------------------------------------ #
+@logger.catch
+def find_circle_plates(
+    image: str | Path | np.ndarray,
+    min_radius: int = 400,
+    max_radius: int = 600,
+    min_dist: float = 500,
+    param1: int = 100,
+    param2: int = 50,
+    dp: float = 1
+) -> np.ndarray | None:
+    """Find circular plate images with the given circle radius in a larger image using Hough circle detection."""
+    if isinstance(image, (str, Path)):
+        img = cv2.imread(str(image), cv2.IMREAD_GRAYSCALE)
+    else:
+        img = image if len(image.shape) != 3 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    if img is None:
+        raise ValueError(f"Could not read image: {image}")
+
+    blurred = cv2.bilateralFilter(img, 9, 75, 75)  # Edge-preserving blur
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(blurred)
+
+    # Detect circles using Hough transform
+    circles = cv2.HoughCircles(
+        enhanced, cv2.HOUGH_GRADIENT,
+        dp=dp, minDist=min_dist,
+        param1=param1, param2=param2,
+        minRadius=min_radius, maxRadius=max_radius
+    )
+  
+    if circles is not None:
+        return circles[0]
+    else:
+        while param1 > 30:
+            circles = cv2.HoughCircles(
+                enhanced, cv2.HOUGH_GRADIENT,
+                dp=dp, minDist=min_dist,
+                param1=param1, param2=param2,
+                minRadius=min_radius, maxRadius=max_radius
+            )
+            if circles is not None:
+                return circles[0]
+            param1 -= 5  # Decrease the higher threshold to be more sensitive
+
+@logger.catch
+def get_plate_crop_radius(image_files: list[Path]) -> int:
+    """Calculate average plate radius using Hough circle detection."""
+    radii = []
+    for file_path in image_files:
+        circles = find_circle_plates(file_path)
+
+        if circles is not None:
+            radii.append(int(circles[0, 2]))
+
+    if not radii:
+        raise ValueError("No circles detected in any images")
+    return int(np.mean(radii))
+
+@logger.catch
+def crop_to_circle(
+    image: Path,
+    radius: int
+) -> list[np.ndarray]:
+    """Crop the image to a circular region defined by center and radius."""
+
+    img = cv2.imread(str(image), cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError(f"Could not read image: {image}")
+    circles = find_circle_plates(
+        img,
+        min_radius=radius - 50,
+        max_radius=radius + 50,
+    )
+
+    plates = []
+    if circles is None:
+        raise ValueError(f"No circle detected in image: {image}")
+    else:
+        sorted_circles = sorted(circles, key=lambda c: (int(c[1]//100), int(c[0]//100)))
+        for c in sorted_circles:
+            x, y = int(c[0]), int(c[1])
+            x1, x2 = max(0, x - radius), min(img.shape[1], x + radius)
+            y1, y2 = max(0, y - radius), min(img.shape[0], y + radius)
+            plate = img[y1:y2, x1:x2]
+            plates.append(plate)
+
+    return plates
+
+@logger.catch
 def find_tetrad_centroid(
-    plate_image: np.ndarray,
-    min_colony_size: int = 50,
-    circularity_threshold: float = 0.7,
-    adaptive_thresh_C: int = 2,
-    adaptive_block_size: int = 30,
-    contrast_alpha: float = 1.0,
-    visualize_colonies: bool = False,
-    base_filename: Optional[str] = None,
-    viz_path: Optional[Path] = None
-) -> Tuple[int, int]:
+    plate: np.ndarray,
+    plate_config: ImageProcessingConfig,
+    viz_image: np.ndarray | None = None
+) -> tuple[int, int, np.ndarray | None]:
     """Find colony centroids in a plate image using OpenCV."""
-    gray = cv2.cvtColor(plate_image, cv2.COLOR_BGR2GRAY) if len(plate_image.shape) == 3 else plate_image
+    gray = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY) if len(plate.shape) == 3 else plate
+    h, w = gray.shape[:2]
+
+    # Crop to specified height and width ranges
+    start_h, end_h = int(h * plate_config.height_range[0] / 100), int(h * plate_config.height_range[1] / 100)
+    start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
+    gray = gray[start_h:end_h, start_w:end_w]
 
     # Enhance contrast
+    if gray is None:
+        raise ValueError("Input plate_image is invalid or could not be converted to grayscale.")
     normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
-    contrast = cv2.convertScaleAbs(normalized, alpha=contrast_alpha, beta=0)
+    contrast = cv2.convertScaleAbs(normalized, alpha=plate_config.contrast_alpha, beta=0)
 
     # CLAHE for better contrast
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(contrast)
 
     # Adaptive thresholding
-    if adaptive_block_size < 3: adaptive_block_size = 3
-    if adaptive_block_size % 2 == 0: adaptive_block_size += 1
+    if plate_config.adaptive_block_size < 3:
+        plate_config.adaptive_block_size = 3
+    if plate_config.adaptive_block_size % 2 == 0:
+        plate_config.adaptive_block_size += 1
 
     thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, adaptive_block_size, -adaptive_thresh_C)
+                                  cv2.THRESH_BINARY, plate_config.adaptive_block_size, -plate_config.adaptive_thresh_c)
 
     # Morphological operations
     kernel = np.ones((3, 3), np.uint8)
@@ -70,16 +193,17 @@ def find_tetrad_centroid(
     colony_centroids = []
     viz_image = None
 
-    if visualize_colonies and base_filename and viz_path:
+    if plate_config.visualize_colonies:
         viz_image = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
 
     for contour in contours:
         area = cv2.contourArea(contour)
         perimeter = cv2.arcLength(contour, True)
-        if perimeter == 0: continue
+        if perimeter == 0:
+            continue
 
         circularity = (4 * np.pi * area) / (perimeter * perimeter)
-        if area > min_colony_size and circularity > circularity_threshold:
+        if area > plate_config.min_colony_size and circularity > plate_config.circularity_threshold:
             M = cv2.moments(contour)
             if M["m00"] != 0:
                 cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
@@ -95,331 +219,165 @@ def find_tetrad_centroid(
         centroid_y = int(np.mean([p[1] for p in colony_centroids]))
     else:
         centroid_x, centroid_y = gray.shape[1] // 2, gray.shape[0] // 2
-        if base_filename:
-            print(f"No colonies found for {base_filename}. Using geometric center.")
-
-    # Save visualization
-    if viz_image is not None:
-        cv2.imwrite(str(viz_path / f"{base_filename}_viz.png"), viz_image)
-        # print(f"Visualization saved: {base_filename}_viz.png")
 
     if viz_image is not None:
         cv2.circle(viz_image, (centroid_x, centroid_y), 10, (255, 0, 0), -1)
+    else:
+        viz_image = None
 
-    return centroid_x, centroid_y
+    # transform centroid back to original plate coordinates
+    centroid_x += start_w
+    centroid_y += start_h
 
-def process_single_plate(
-    plate_image: np.ndarray,
-    output_path: Path,
-    base_filename: str,
-    height_range: Tuple[int, int] = (45, 80),
-    width_range: Tuple[int, int] = (15, 90),
-    final_height_percent: int = 30,
-    final_width_percent: int = 75,
-    final_size_px: Optional[Tuple[int, int]] = None,
-    viz_path: Optional[Path] = None,
-    max_centroid_deviation_px: Optional[int] = None,
-    reference_centroid: Optional[Tuple[int, int]] = None,
-    **kwargs
-) -> Tuple[int, int]:
-    """Process single plate image with colony detection, cropping, and optional centroid adjustment."""
-    h, w = plate_image.shape[:2]
+    return centroid_x, centroid_y, viz_image
 
-    # Extract processing region
-    start_h, end_h = int(h * height_range[0] / 100), int(h * height_range[1] / 100)
-    start_w, end_w = int(w * width_range[0] / 100), int(w * width_range[1] / 100)
-    plate_region = plate_image[start_h:end_h, start_w:end_w]
+@logger.catch
+def process_plates(
+    plate_images: list[np.ndarray],
+    plate_config: ImageProcessingConfig,
+) -> list[np.ndarray]:
+    """
+    Process multiple plate images using the 3-step logic:
+    1. Crop the image based on height_range and width_range to get focused image
+    2. Detect colonies and perform centroid adjustment if necessary
+    3. Crop the image based on both centroid and final_height_percent/final_width_percent
+    """
 
-    # Find colony centroid
-    rel_cx, rel_cy = find_tetrad_centroid(
-        plate_region,
-        base_filename=base_filename,
-        viz_path=viz_path,
-        **kwargs
-    )
-
-    # Convert to absolute coordinates
-    abs_cx, abs_cy = start_w + rel_cx, start_h + rel_cy
+    processed_plates = []
+    for plate_image in plate_images:
+        centroid_x, centroid_y, viz_image = find_tetrad_centroid(plate_image, plate_config=plate_config)
+        processed_plates.append({
+            'plate_image': plate_image,
+            'centroid': (centroid_x, centroid_y),
+            'viz_image': viz_image
+        })
 
     # Centroid adjustment for both tetrad and replica plates
-    if reference_centroid is not None and max_centroid_deviation_px is not None:
-        # Calculate distance from reference centroid
-        dist = np.linalg.norm(np.array([abs_cx, abs_cy]) - np.array(reference_centroid))
-        if dist > max_centroid_deviation_px:
-            print(f"Adjusting centroid for {base_filename} (deviation: {dist:.1f}px > {max_centroid_deviation_px}px)")
-            abs_cx, abs_cy = reference_centroid
-        else:
-            if base_filename:
-                print(f"Using detected centroid for {base_filename} (deviation: {dist:.1f}px)")
+    if plate_config.max_centroid_deviation_px is not None:
+        # calculate average centroid
+        centroids = np.array([p['centroid'] for p in processed_plates])
+        avg_centroid = np.mean(centroids, axis=0)
+        for p in processed_plates:
+            dist = np.linalg.norm(np.array(p['centroid']) - avg_centroid)
+            if dist > plate_config.max_centroid_deviation_px:
+                logger.info(f"Adjusting centroid from {p['centroid']} to {tuple(avg_centroid.astype(int))} (deviation: {dist:.1f}px)")
+                p['final_centroid'] = tuple(avg_centroid.astype(int))
+            else:
+                p['final_centroid'] = p['centroid']
 
-    # Determine final size
-    if final_size_px:
-        final_w, final_h = final_size_px
-    else:
-        final_w = int(w * final_width_percent / 100)
-        final_h = int(h * final_height_percent / 100)
+    # Process final cropped images
+    for p in processed_plates:
+        plate_image = p['plate_image']
+        abs_cx, abs_cy = p['final_centroid']
+        h, w = plate_image.shape[:2]
 
-    # Crop and resize
-    crop_x1, crop_x2 = max(0, abs_cx - final_w // 2), min(w, abs_cx + final_w // 2)
-    crop_y1, crop_y2 = max(0, abs_cy - final_h // 2), min(h, abs_cy + final_h // 2)
-    cropped = plate_image[crop_y1:crop_y2, crop_x1:crop_x2]
-    final = cv2.resize(cropped, (final_w, final_h))
+        # Crop around the detected centroid
+        final_width = int(w * (plate_config.final_width_percent / 100))
+        final_height = int(h * (plate_config.final_height_percent / 100))
 
-    cv2.imwrite(str(output_path), final)
-    # print(f"Saved: {output_path.name} ({final_w}x{final_h})")
-    return final_w, final_h
+        start_x = max(0, abs_cx - final_width // 2)
+        end_x = start_x + final_width
+        start_y = max(0, abs_cy - final_height // 2)
+        end_y = start_y + final_height
+        cropped = plate_image[start_y:end_y, start_x:end_x]
+        p["final_cropped"] = cropped
+    return processed_plates
 
-def get_plate_crop_radius(image_files: List[Path]) -> int:
-    """Calculate average plate radius using Hough circle detection."""
-    radii = []
-    for file_path in image_files:
-        img = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
-        if img is None: continue
-
-        blurred = cv2.GaussianBlur(img, (9, 9), 2)
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT,
-            dp=1.2, minDist=100, param1=50, param2=30,
-            minRadius=100, maxRadius=500
-        )
-
-        if circles is not None:
-            radii.append(int(circles[0, 0, 2]))
-
-    if not radii:
-        raise ValueError("No circles detected in any images")
-    return int(np.mean(radii))
-
+@logger.catch
 def process_tetrad_images(
     round_config: roundConfig,
-    **kwargs
-) -> Optional[Tuple[Tuple[int, int] | None, int | None]]:
+    image_processing_config: ImageProcessingConfig,
+    replica: bool = False
+):
     """Process tetrad images and return synchronized dimensions."""
     for sub_folder, input_output_paths in round_config.all_sub_folders.items():
-        if sub_folder == "replica":
-            continue
+        if replica:
+            if sub_folder != "replica":
+                continue
+        else:
+            if sub_folder == "replica":
+                continue
         input_folder_path = input_output_paths["input"]
         output_folder_path = input_output_paths["output"]
-        print(f"Processing tetrad images in: {input_folder_path}")
-        print(f"Output will be saved to: {output_folder_path}")
+        logger.info(" ")
+        logger.info("-" * 100)
+        logger.info(f"Processing tetrad images in: {input_folder_path}")
+        logger.info(f"Output will be saved to: {output_folder_path}")
         # Set the output visualization path
         viz_path = None
-        if kwargs.get('visualize_colonies', False):
+        if image_processing_config.visualize_colonies:
             viz_path = output_folder_path / "results_visualization"
             viz_path.mkdir(parents=True, exist_ok=True)
 
         # Find all tetrad images
-        all_images = list(input_folder_path.glob("*.tif*"))
+        all_tif_images = list(input_folder_path.glob("*.tif*"))
+        all_jpg_images = list(input_folder_path.glob("*.jpg*"))
+        all_images = all_tif_images + all_jpg_images
 
         if not all_images:
-            print("No .tif files found")
-            return None, None
+            logger.error("No .tif or .jpg files found")
 
-        print(f"Found {len(all_images)} tetrad images")
+        logger.info(f"Found {len(all_images)} tetrad images: {len(all_tif_images)} .tif and {len(all_jpg_images)} .jpg")
 
         # Get crop radius
-        target_radius = kwargs.get('target_radius')
+        target_radius = image_processing_config.target_radius
         if not target_radius:
             try:
                 target_radius = get_plate_crop_radius(all_images)
-                print(f"Auto-detected radius: {target_radius}px")
+                logger.info(f"Auto-detected radius: {target_radius}px")
             except ValueError as e:
-                print(f"Radius detection failed: {e}")
-                return None, None
+                logger.error(f"Radius detection failed: {e}")
         else:
-            print(f"Using specified radius: {target_radius}px")
-
+            logger.info(f"Using specified radius: {target_radius}px")
         # Process images
-        processed_data = []
+        plates_with_path = {}
+        failed_images = []
         for img_path in tqdm(all_images, desc="Processing tetrads"):
-            img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-            if img is None: continue
+            plates = crop_to_circle(img_path, target_radius)
+            if len(plates) == 0:
+                logger.error(f"No plates detected in image: {img_path}")
+                failed_images.append(img_path)
+                continue
+            if replica:
+                if len(plates) == 5:
+                    for idx, plate in enumerate(plates):
+                        replica_plate_name = REPLICA_PLATES_ORDER.get(idx)
+                        img_name = img_path.stem.replace(REPLICA_NAME, replica_plate_name)
+                        plates_with_path[img_name] = plate
+                elif len(plates) > 5:
+                    logger.error(f"More than 5 plates detected in image: {img_path}, skipping.")
+                    failed_images.append(img_path)
+            else:
+                if len(plates) == 1:
+                    plate = plates[0]
+                    plates_with_path[img_path.stem] = plate
+                elif 1 < len(plates) < 5:
+                    plate = plates[0]
+                    logger.warning(f"Only {len(plates)} plates detected in image: {img_path}, expected 1. Using the first detected plate.")
+                    plates_with_path[img_path.stem] = plate
+                else:
+                    logger.error(f"Multiple plates detected in image: {img_path}, skipping.")
+                    failed_images.append(img_path)
 
-            # Detect plate
-            blurred = cv2.GaussianBlur(img, (9, 9), 2)
-            circles = cv2.HoughCircles(
-                blurred, cv2.HOUGH_GRADIENT,
-                dp=1.2, minDist=100, param1=50, param2=30,
-                minRadius=100, maxRadius=500
+    
+        if len(plates_with_path) > 0:
+            processed_plates = process_plates(
+                plate_images=list(plates_with_path.values()),
+                plate_config=image_processing_config
             )
 
-            if circles is not None:
-                x, y = int(circles[0, 0, 0]), int(circles[0, 0, 1])
+            # Save processed images
+            for (img_name, _), cropped_plate in zip(plates_with_path.items(), processed_plates):
+                out_path = output_folder_path / (img_name + ".cropped.png")
+                cv2.imwrite(str(out_path), cropped_plate["final_cropped"])
 
-                # Extract plate region
-                x1, x2 = max(0, x - target_radius), min(img.shape[1], x + target_radius)
-                y1, y2 = max(0, y - target_radius), min(img.shape[0], y + target_radius)
-                plate = img[y1:y2, x1:x2]
-                plate = cv2.resize(plate, (2 * target_radius, 2 * target_radius))
+                if cropped_plate["viz_image"] is not None:
+                    viz_out_path = viz_path / (img_name + ".viz.png")
+                    cv2.imwrite(str(viz_out_path), cropped_plate["viz_image"])
 
-                # Find centroid
-                centroid_kwargs = {k: v for k, v in kwargs.items()
-                               if k in ['min_colony_size', 'circularity_threshold',
-                                         'adaptive_thresh_c', 'adaptive_block_size',
-                                         'contrast_alpha', 'visualize_colonies']}
-                rel_cx, rel_cy = find_tetrad_centroid(
-                    plate,
-                    base_filename=img_path.stem,
-                    viz_path=viz_path,
-                    **centroid_kwargs
-                )
-
-                processed_data.append({
-                    'path': img_path,
-                    'plate': plate,
-                    'centroid': (rel_cx, rel_cy)
-                })
-
-        if not processed_data:
-            print("No images processed successfully")
-            return None, None
-
-        # Centroid adjustment (simplified)
-        max_deviation = kwargs.get('max_centroid_deviation_px')
-        if max_deviation and len(processed_data) > 1:
-            centroids = np.array([d['centroid'] for d in processed_data])
-            avg_centroid = np.mean(centroids, axis=0)
-
-            for data in processed_data:
-                dist = np.linalg.norm(np.array(data['centroid']) - avg_centroid)
-                if dist > max_deviation:
-                    print(f"Adjusting {data['path'].name} (deviation: {dist:.1f}px)")
-                    data['final_centroid'] = tuple(avg_centroid.astype(int))
-                else:
-                    data['final_centroid'] = data['centroid']
-        else:
-            for data in processed_data:
-                data['final_centroid'] = data['centroid']
-
-        # Process final images
-        final_size = None
-        for data in processed_data:
-            final_w = int(2 * target_radius * kwargs.get('final_tetrad_width_percent', 75) / 100)
-            final_h = int(2 * target_radius * kwargs.get('final_tetrad_height_percent', 30) / 100)
-
-            cx, cy = data['final_centroid']
-            x1, x2 = max(0, cx - final_w // 2), min(2 * target_radius, cx + final_w // 2)
-            y1, y2 = max(0, cy - final_h // 2), min(2 * target_radius, cy + final_h // 2)
-
-            cropped = data['plate'][y1:y2, x1:x2]
-            final = cv2.resize(cropped, (final_w, final_h))
-
-            out_file = output_folder_path / f"{data['path'].stem}.cropped.png"
-            cv2.imwrite(str(out_file), final)
-
-            if final_size is None:
-                final_size = (final_w, final_h)
-
-        if final_size:
-            print(f"Final size: {final_size[0]}x{final_size[1]}")
-            return final_size, target_radius
-        else:
-            return None, None
-
-def process_replica_images(
-    round_config: roundConfig,
-    final_output_size_px: Optional[Tuple[int, int]],
-    tetrad_crop_radius: Optional[int],
-    **kwargs
-) -> None:
-    """Process replica images using tetrad dimensions."""
-    if not final_output_size_px or not tetrad_crop_radius:
-        print("Error: Need tetrad output size and radius")
-        return
-
-    input_path = round_config.all_sub_folders["replica"]["input"]
-    output_path = round_config.all_sub_folders["replica"]["output"]
-
-    plate_names = {0: "YES", 1: "NAT", 2: "HYG", 3: "ADE", 4: "LEU"}
-
-    # Find replica images
-    image_files = [f for f in input_path.glob("*.tif*")]
-
-    if not image_files:
-        print(f"No replica images found in {input_path}")
-        return
-
-    print(f"Processing {len(image_files)} replica images")
-    crop_radius = tetrad_crop_radius
-
-    for img_path in tqdm(image_files, desc="Processing replicas"):
-        img_color = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-        if img_color is None: continue
-
-        img_gray = cv2.cvtColor(img_color, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(img_gray, (9, 9), 2)
-
-        # Detect 5 replica plates
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT,
-            dp=1.5, minDist=crop_radius,
-            param1=100, param2=40,
-            minRadius=int(crop_radius * 0.8),
-            maxRadius=int(crop_radius * 1.2)
-        )
-
-        if circles is not None and len(circles[0]) >= 5:
-            sorted_circles = sorted(circles[0], key=lambda c: c[1])
-            plates = [sorted_circles[0]] + sorted(sorted_circles[1:5], key=lambda c: (c[1], c[0]))
-
-            for i, (x, y, r) in enumerate(plates):
-                x, y = int(x), int(y)
-                plate_name = plate_names.get(i, f"plate_{i}")
-
-                # Extract plate
-                x1, x2 = max(0, x - crop_radius), min(img_color.shape[1], x + crop_radius)
-                y1, y2 = max(0, y - crop_radius), min(img_color.shape[0], y + crop_radius)
-                plate_img = img_color[y1:y2, x1:x2]
-                plate_img = cv2.resize(plate_img, (2 * crop_radius, 2 * crop_radius))
-
-                # Process final output
-                out_path = output_path / (img_path.stem.replace("YHZAY2A", plate_name) + ".cropped.png")
-
-                # Filter kwargs for process_single_plate
-                plate_kwargs = {k: v for k, v in kwargs.items()
-                               if k in ['min_colony_size', 'circularity_threshold',
-                                         'adaptive_thresh_c', 'adaptive_block_size',
-                                         'contrast_alpha', 'visualize_colonies',
-                                         'height_range', 'width_range',
-                                         'final_height_percent', 'final_width_percent',
-                                         'max_centroid_deviation_px']}
-
-                process_single_plate(
-                    plate_image=plate_img,
-                    output_path=out_path,
-                    base_filename=f"{img_path.stem}_{plate_name}",
-                    final_size_px=final_output_size_px,
-                    **plate_kwargs
-                )
-        else:
-            print(f"Only {len(circles[0]) if circles is not None else 0} plates found in {img_path.name}")
-
-def main() -> None:
-    """Simple main function for testing."""
-    print("DIT-HAP Image Processing")
-    tetrad_size, tetrad_radius = process_tetrad_images(
-        round_config=roundConfig(
-            raw_data_folder_path='data',
-            round_folder_name='1st_round',
-            output_folder_path='results/tetrad_cropped'
-        ),
-        target_radius=490,
-        min_colony_size=50,
-        visualize_colonies=True
-    )
-
-    if tetrad_size and tetrad_radius:
-        process_replica_images(
-            round_config=roundConfig(
-                raw_data_folder_path='data',
-                round_folder_name='replica',
-                output_folder_path='results/replica_cropped'
-            ),
-            final_output_size_px=tetrad_size,
-            tetrad_crop_radius=tetrad_radius,
-            min_colony_size=100,
-            visualize_colonies=True
-        )
-
-if __name__ == '__main__':
-    main()
+            logger.info(f"Processed {len(processed_plates)} tetrad images.")
+            if failed_images:
+                logger.error("*-" * 30 + f"Failed to process {len(failed_images)} images:" + " -*" * 30)
+                for f_img in failed_images:
+                    logger.error(f" - {f_img}")
+                logger.error("*-" * 70)
