@@ -222,8 +222,19 @@ def build_verification_dataframe(image_data: list[dict], verification_meta: veri
             "phenotype_categories": gene_row.get("Category", ""),
             "phenotype_descriptions": gene_row.get("Phenotype_description", ""),
             "colony_id": colony_id,
-            "date": date_str
+            "date": date_str,
+            # New empty columns for user to fill
+            "verification_phenotype": "",
+            "verification_essentiality": "",
+            "Kept": ""
         }
+
+        # Define the desired order for image path columns
+        image_column_order = ["3d", "4d", "5d", "6d", "YES", "HYG", "NAT", "LEU", "ADE"]
+
+        # Initialize all image path columns to empty strings first
+        for column in image_column_order:
+            record[f"{column}_image_path"] = ""
 
         # Add image paths for different time points and markers
         for _, row in group.iterrows():
@@ -231,9 +242,7 @@ def build_verification_dataframe(image_data: list[dict], verification_meta: veri
             image_path = row["image_path"]
 
             # Map to appropriate column
-            if day_or_marker in ["3d", "4d", "5d", "6d"]:
-                record[f"{day_or_marker}_image_path"] = image_path
-            elif day_or_marker in ["YES", "HYG", "NAT", "LEU", "ADE"]:
+            if day_or_marker in image_column_order:
                 record[f"{day_or_marker}_image_path"] = image_path
 
         verification_records.append(record)
