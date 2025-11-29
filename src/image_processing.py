@@ -168,7 +168,7 @@ def find_tetrad_centroid(
     # Enhance contrast
     if gray is None:
         raise ValueError("Input plate_image is invalid or could not be converted to grayscale.")
-    normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+    normalized = cv2.normalize(gray, dst=np.zeros_like(gray), alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     contrast = cv2.convertScaleAbs(normalized, alpha=plate_config.contrast_alpha, beta=0)
 
     # CLAHE for better contrast
