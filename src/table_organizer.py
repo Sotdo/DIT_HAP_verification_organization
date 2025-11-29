@@ -195,9 +195,30 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
 
     df = pd.DataFrame(verification_records)
 
-    # Sort final DataFrame by gene_num as integer to ensure proper ordering
+    # Sort final DataFrame by gene_num as integer, then colony_id to ensure proper ordering
     df['gene_num_int'] = df['gene_num'].astype(int)
-    df = df.sort_values('gene_num_int').drop(columns=['gene_num_int'])
+
+    # Extract numeric part from colony_id for sorting (handles A, B, C, etc.)
+    def extract_colony_number(colony_id: str) -> int:
+        try:
+            # Handle colony IDs like "A", "B", "C" or "colonyA", "colonyB"
+            # Look for numeric patterns first, then handle letter-based colonies
+            if colony_id.isdigit():
+                return int(colony_id)
+            elif colony_id.isalpha():
+                # Convert A=1, B=2, C=3, etc.
+                return ord(colony_id.upper()) - ord('A') + 1
+            else:
+                # Extract numbers from mixed IDs like "colonyA1"
+                numbers = re.findall(r'\d+', colony_id)
+                return int(numbers[0]) if numbers else 0
+        except Exception:
+            return 0
+
+    df['colony_num'] = df['colony_id'].apply(extract_colony_number)
+
+    # Sort by gene_num first, then by colony_num
+    df = df.sort_values(['gene_num_int', 'colony_num']).drop(columns=['gene_num_int', 'colony_num'])
 
     return df
 
@@ -205,7 +226,7 @@ def create_verification_table(config: TableOrganizerConfig, round_name: str) -> 
 @logger.catch
 def export_single_excel(all_rounds_data: dict[str, pd.DataFrame], config: TableOrganizerConfig):
     """
-    Export all rounds to a single Excel file with multiple sheets.
+    Export all rounds to a single Excel file with multiple sheets and concatenated data.
 
     Args:
         all_rounds_data: Dictionary with round names as keys and DataFrames as values
@@ -232,6 +253,27 @@ def export_single_excel(all_rounds_data: dict[str, pd.DataFrame], config: TableO
 
     summary_df = pd.DataFrame(summary_data)
 
+    # Create concatenated DataFrame for all rounds
+    all_rounds_concatenated = []
+    for round_name, df in all_rounds_data.items():
+        if not df.empty:
+            # Add round name to each record if not already present
+            df_copy = df.copy()
+            if 'round' not in df_copy.columns:
+                df_copy['round'] = round_name
+            all_rounds_concatenated.append(df_copy)
+
+    concatenated_df = pd.concat(all_rounds_concatenated, ignore_index=True)
+
+    # Sort concatenated DataFrame by gene_num_int and colony_num for consistency
+    if not concatenated_df.empty:
+        concatenated_df['gene_num_int'] = concatenated_df['gene_num'].astype(int)
+        concatenated_df['colony_num'] = concatenated_df['colony_id'].apply(
+            lambda x: int(x) if x.isdigit() else (ord(x.upper()) - ord('A') + 1) if x.isalpha() else 0
+        )
+        concatenated_df = concatenated_df.sort_values(['gene_num_int', 'colony_num']).drop(columns=['gene_num_int', 'colony_num'])
+
+    # Export individual round sheets file
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         # Add summary sheet first
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
@@ -244,7 +286,15 @@ def export_single_excel(all_rounds_data: dict[str, pd.DataFrame], config: TableO
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 logger.info(f"Added sheet '{sheet_name}' with {len(df)} records")
 
-    logger.success(f"All rounds exported to single Excel file: {output_file}")
+    logger.success(f"Individual round sheets exported to: {output_file}")
+
+    # Export independent file with all rounds combined
+    if not concatenated_df.empty:
+        combined_output_file = config.output_base_path / "all_rounds_combined_verification_summary.xlsx"
+        concatenated_df.to_excel(combined_output_file, sheet_name='All Rounds Combined', index=False)
+        logger.success(f"Combined rounds exported to independent Excel file: {combined_output_file}")
+        logger.info(f"Combined file contains {len(concatenated_df)} total records from {len(all_rounds_data)} rounds")
+
     return output_file
 
 
@@ -351,12 +401,14 @@ def process_all_rounds(config: TableOrganizerConfig):
     logger.info(f"Found {len(round_names)} rounds to process:")
     for round_name in sorted_round_names:
         logger.info(f" - {round_name}")
+    logger.info("")
 
     # Collect all rounds data for single Excel export
     all_rounds_data = {}
     total_records = 0
 
     for round_name in sorted_round_names:
+        logger.info("-"*30 + f"Processing round: {round_name}" + "-"*30)
         try:
             # Create verification table for this round
             df = create_verification_table(config, round_name)
@@ -371,6 +423,7 @@ def process_all_rounds(config: TableOrganizerConfig):
         except Exception as e:
             logger.error(f"Error processing round {round_name}: {e}")
             continue
+        
 
     # Export all rounds to single Excel file if we have data
     if all_rounds_data:
