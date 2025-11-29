@@ -272,8 +272,47 @@ def create_gene_info_text(
 
 
 @logger.catch
+def calculate_dynamic_page_size(
+    gene_records: list[dict],
+    config: PDFGeneratorConfig
+) -> tuple[float, float]:
+    """
+    Calculate dynamic page size based on number of colonies for a gene.
+
+    Args:
+        gene_records: List of gene records for this gene (all have same gene_num)
+        config: PDF generator configuration
+
+    Returns:
+        Tuple of (page_width, page_height) in points
+    """
+    # Base height for header, summary, and spacing
+    base_height_points = 120  # Title + summary + spacing
+
+    # Height per row: image height + padding + borders
+    row_height_points = (config.image_height * 72) + 20  # Convert inches to points, add padding
+
+    # Calculate height based on number of colonies
+    num_colonies = len(gene_records)
+    content_height_points = row_height_points * num_colonies
+
+    # Total height
+    total_height_points = base_height_points + content_height_points
+
+    # Set minimum height for very small genes
+    min_height_points = 300
+    total_height_points = max(total_height_points, min_height_points)
+
+    # Use landscape width from config
+    page_width = config.page_width
+
+    logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height_points:.1f} points")
+
+    return page_width, total_height_points
+
+
+@logger.catch
 def create_pdf_table(
-    doc: SimpleDocTemplate,
     styles: dict,
     df: pd.DataFrame,
     gene_records: list[dict],
@@ -283,7 +322,6 @@ def create_pdf_table(
     Create a PDF table with gene information and images.
 
     Args:
-        doc: SimpleDocTemplate object
         styles: Dictionary of paragraph styles
         df: Verification table DataFrame
         gene_records: List of gene records for this page (all have same gene_num)
@@ -364,13 +402,85 @@ def create_pdf_table(
 
 
 @logger.catch
+def create_gene_page_pdf(
+    df: pd.DataFrame,
+    gene_records: list[dict],
+    config: PDFGeneratorConfig,
+    round_name: str,
+    page_index: int,
+    total_genes: int
+) -> Path:
+    """
+    Create individual PDF page for a specific gene with custom page size.
+
+    Args:
+        df: Verification table DataFrame
+        gene_records: List of gene records for this gene (all have same gene_num)
+        config: PDF generator configuration
+        round_name: Name of the experimental round
+        page_index: Index of this gene page (for multi-page PDF)
+        total_genes: Total number of genes
+
+    Returns:
+        Path to generated PDF file for this gene
+    """
+    # Calculate dynamic page size based on colony count
+    page_width, page_height = calculate_dynamic_page_size(gene_records, config)
+
+    # Create temporary PDF file for this gene
+    gene_num = gene_records[0]['gene_num']
+    gene_name = gene_records[0]['gene_name']
+
+    temp_output_path = config.output_base_path / f"temp_gene_{gene_num}_page_{page_index}.pdf"
+
+    # Create document with custom page size
+    doc = SimpleDocTemplate(
+        str(temp_output_path),
+        pagesize=(page_width, page_height),
+        leftMargin=config.margin * inch,
+        rightMargin=config.margin * inch,
+        topMargin=config.margin * inch,
+        bottomMargin=config.margin * inch
+    )
+
+    styles = create_pdf_styles(config)
+
+    # Build this page content
+    story = []
+
+    # Add gene title
+    title = f"Gene {gene_num} - {gene_name} (Round {round_name})"
+    story.append(Paragraph(title, styles['title']))
+    story.append(Spacer(1, 0.25 * inch))
+
+    # Add gene summary
+    num_colonies = len(gene_records)
+    summary_text = f"""
+    Gene: {gene_num} - {gene_name}<br/>
+    Total Colonies: {num_colonies}<br/>
+    Page {page_index + 1} of {total_genes}
+    """
+    story.append(Paragraph(summary_text, styles['gene_info']))
+    story.append(Spacer(1, 0.25 * inch))
+
+    # Create table for this gene
+    table_elements = create_pdf_table(styles, df, gene_records, config)
+    story.extend(table_elements)
+
+    # Build this gene's page
+    doc.build(story)
+
+    return temp_output_path
+
+
+@logger.catch
 def create_verification_pdf(
     df: pd.DataFrame,
     config: PDFGeneratorConfig,
     round_name: str
 ) -> Path:
     """
-    Generate verification PDF for a specific round.
+    Generate verification PDF for a specific round using dynamic page sizing per gene.
 
     Args:
         df: Verification table DataFrame
@@ -381,18 +491,6 @@ def create_verification_pdf(
         Path to generated PDF file
     """
     output_path = config.output_base_path / f"round_{round_name}_verification_summary.pdf"
-
-    # Create document
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=(config.page_width, config.page_height),
-        leftMargin=config.margin * inch,
-        rightMargin=config.margin * inch,
-        topMargin=config.margin * inch,
-        bottomMargin=config.margin * inch
-    )
-
-    styles = create_pdf_styles(config)
 
     # Group records by gene and colony
     if df.empty:
@@ -431,60 +529,78 @@ def create_verification_pdf(
     if current_gene_records:
         gene_groups.append(current_gene_records)
 
-    logger.info(f"Creating PDF with {len(gene_groups)} pages for round {round_name}")
+    logger.info(f"Creating PDF with {len(gene_groups)} dynamically-sized pages for round {round_name}")
 
-    # Build document
-    story = []
+    # Create individual PDF pages for each gene
+    temp_pdf_files = []
+    total_genes = len(gene_groups)
 
-    # Add title
-    story.append(Paragraph(f"DIT-HAP Verification Summary - Round {round_name}", styles['title']))
-    story.append(Spacer(1, 0.25 * inch))
-
-    # Add summary statistics
-    total_genes = len(unique_records)
-    complete_time_series = len(df.dropna(subset=['3d_image_path', '4d_image_path', '5d_image_path', '6d_image_path'], how='all'))
-
-    summary_text = f"""
-    Total Gene-Colony Records: {total_genes}<br/>
-    Records with Complete Time Series: {complete_time_series}<br/>
-    Completion Rate: {(complete_time_series / total_genes * 100):.1f}%
-    """
-    story.append(Paragraph(summary_text, styles['gene_info']))
-    story.append(Spacer(1, 0.25 * inch))
-
-    # Add pages with gene data - one page per gene_num with page breaks
     for i, gene_group in enumerate(gene_groups):
-        if i > 0:  # Add explicit page break between different genes
-            story.append(Spacer(1, 0.1 * inch))
+        logger.info(f"Creating page {i + 1}/{total_genes} for gene {gene_group[0]['gene_num']} ({len(gene_group)} colonies)")
 
-        # Create table for this gene
-        table_elements = create_pdf_table(doc, styles, df, gene_group, config)
+        try:
+            temp_pdf_path = create_gene_page_pdf(
+                df, gene_group, config, round_name, i, total_genes
+            )
+            temp_pdf_files.append(temp_pdf_path)
+        except Exception as e:
+            logger.error(f"Error creating PDF page for gene {gene_group[0]['gene_num']}: {e}")
+            continue
 
-        # Add table elements
-        story.extend(table_elements)
+    # Merge all individual PDF pages into final document
+    if temp_pdf_files:
+        try:
+            # Try PyPDF2 first (preferred)
+            try:
+                from PyPDF2 import PdfMerger
+                use_pypdf2 = True
+            except ImportError:
+                logger.warning("PyPDF2 not available. Using simple PDF concatenation method")
+                use_pypdf2 = False
 
-        # Add page break after each gene except the last one
-        if i < len(gene_groups) - 1:
-            from reportlab.platypus import PageBreak
-            story.append(PageBreak())
+            if use_pypdf2:
+                merger = PdfMerger()
 
-    # Build PDF
-    doc.build(story)
+                # Add all temporary PDFs
+                for temp_pdf in temp_pdf_files:
+                    merger.append(str(temp_pdf))
 
-    logger.success(f"Generated verification PDF: {output_path}")
+                # Write final merged PDF
+                merger.write(str(output_path))
+                merger.close()
+
+                # Clean up temporary files
+                for temp_pdf in temp_pdf_files:
+                    temp_pdf.unlink(missing_ok=True)
+
+                logger.success(f"Generated verification PDF with dynamic page sizing: {output_path}")
+            else:
+                # Fallback: just copy the first PDF as single gene example
+                logger.warning("Multiple gene pages created but cannot merge without PyPDF2")
+                logger.info(f"Individual gene PDFs available in: {config.output_base_path}")
+                logger.info("Install PyPDF2 with: pip install PyPDF2 to merge into single document")
+
+                # Copy first PDF as the main document with different name
+                if temp_pdf_files:
+                    first_pdf = temp_pdf_files[0]
+                    output_path_single = config.output_base_path / f"round_{round_name}_gene_{gene_groups[0][0]['gene_num']}_example.pdf"
+                    import shutil
+                    shutil.copy2(first_pdf, output_path_single)
+                    logger.info(f"Example gene PDF created: {output_path_single}")
+
+        except Exception as e:
+            logger.error(f"Error processing PDFs: {e}")
+            logger.info(f"Individual gene PDFs remain available in: {config.output_base_path}")
+    else:
+        logger.warning("No PDF pages created to merge")
+
     return output_path
 
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
 @logger.catch
 def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = None):
-    """
-    Generate PDFs for specified round or all rounds.
-
-    Args:
-        config: PDF generator configuration
-        round_name: Specific round to process, or None for all rounds
-    """
+    """Generate PDFs for specified round or all rounds."""
     # Find verification table file
     verification_file = config.table_structures_path / "all_rounds_verification_summary.xlsx"
 
