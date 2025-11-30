@@ -22,105 +22,88 @@ sys.path.append(str(Path(__file__).parent))
 # %% ------------------------------------ Configuration ------------------------------------ #
 @dataclass
 class PDFGeneratorConfig:
-    """Simple configuration for PDF generation."""
+    """Configuration for PDF generation with high resolution."""
     # Input/output paths
     processed_data_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion")
     output_base_path: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/merged_pdfs/DIT_HAP_deletion")
-    table_structures_path: Path = Path("../results")
+    table_structures_path: Path = Path("../results")  # Path to table structures output from table_organizer.py
 
-    # Page layout (in inches - easy to understand)
-    page_width: float = 11.69  # A4 landscape width
-    page_height: float = 8.27   # A4 landscape height
-    margin: float = 1.0        # Margin around page
+    # High resolution PDF parameters (300 DPI for print quality)
+    dpi: int = 300  # Dots per inch for high quality
+    page_width_inches: float = 11.69  # A4 landscape width in inches
+    page_height_base: float = 8.27  # A4 landscape height in inches (base, will be extended)
+    margin_inches: float = 1  # margin in inches
 
-    # Content sizing (in inches)
-    image_width: float = 1.0   # Width of each image
-    image_height: float = 0.4  # Height of each image
-    gene_info_width: float = 3.0  # Width of gene info column
-    spacing: float = 0.1       # Spacing between elements
-    padding: float = 0.05      # Padding inside cells
+    # Convert to pixels for PILLOW
+    page_width: int = int(11.69 * dpi)  # A4 landscape width at 300 DPI
+    margin: int = int(1 * dpi)  # margin in pixels
 
-    # Text settings (in points - standard font sizing)
-    title_font_size: int = 16  # Title text size
-    header_font_size: int = 12  # Header text size
-    text_font_size: int = 9    # Regular text size
+    # Image sizes in pixels (high resolution)
+    image_width: int = int(1.0 * dpi)  # 1 inch width at 300 DPI = 300 pixels
+    image_height: int = int(0.4 * dpi)  # 0.4 inch height at 300 DPI = 120 pixels
+    cell_padding: int = int(0.05 * dpi)  # 0.05 inch padding = 15 pixels
+    border_width: int = 1  # border width in pixels
+    spacing: int = int(0.2 * dpi)  # spacing between elements in pixels
 
-    # Quality settings
-    dpi: int = 300            # Resolution for print quality
+    # Text settings (optimized for high DPI)
+    title_font_size_pt: int = 16  # points
+    header_font_size_pt: int = 16  # points
+    text_font_size_pt: int = 9  # points
 
-    # Visual style
-    line_color: str = "#333333"  # Grid line color (dark gray)
-    border_color: str = "#000000" # Outer border color (black)
-    background_color: str = "#fafafa"  # Alternating row background
+    # Convert points to pixels for PILLOW (72 points per inch, but we scale for DPI)
+    title_font_size: int = int((title_font_size_pt / 72) * dpi)
+    header_font_size: int = int((header_font_size_pt / 72) * dpi)
+    text_font_size: int = int((text_font_size_pt / 72) * dpi)
+    line_spacing: int = int((10 / 72) * dpi)  # 10 points line spacing
+
+    # Grid line styling
+    grid_line_width: int = 2  # pixels for consistent grid lines
+    grid_line_color: str = "#333333"  # Dark gray for clear visibility
+    outer_border_width: int = 3  # pixels for outer border
+    outer_border_color: str = "#000000"  # Black for outer border
+
+    max_rows_per_page: int = 10  # 4 rows per page
 
     # Quality thresholds for image inclusion
     min_image_width: int = 100
     min_image_height: int = 100
     max_file_size_mb: float = 10.0
 
-    def __post_init__(self):
-        """Initialize fonts and ensure output directory exists."""
-        self.output_base_path.mkdir(parents=True, exist_ok=True)
+    # Font settings
+    title_font = None
+    header_font = None
+    text_font = None
 
-        # Initialize fonts with automatic fallback
-        self.title_font = self._load_font(self.title_font_size, bold=True)
-        self.header_font = self._load_font(self.header_font_size, bold=True)
-        self.text_font = self._load_font(self.text_font_size, bold=False)
-
-    def _load_font(self, size: int, bold: bool = False):
-        """Load font with automatic fallback."""
+    try:
+        # Try to use Arial font with high quality anti-aliasing
+        font_family = "arial.ttf"
+        title_font = ImageFont.truetype(font_family, title_font_size, index=0)
+        header_font = ImageFont.truetype(font_family, header_font_size, index=0)
+        text_font = ImageFont.truetype(font_family, text_font_size, index=0)
+        logger.info(f"Using Arial font at {dpi} DPI")
+    except Exception as e:
+        # Try system fonts as fallback
         try:
-            # Try Arial first
-            return ImageFont.truetype("arial.ttf", size)
+            import os
+            if os.name == 'nt':  # Windows
+                font_family = "C:/Windows/Fonts/arial.ttf"
+            else:  # Linux/Unix
+                font_family = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+            title_font = ImageFont.truetype(font_family, title_font_size)
+            header_font = ImageFont.truetype(font_family, header_font_size)
+            text_font = ImageFont.truetype(font_family, text_font_size)
+            logger.info(f"Using system font: {font_family}")
         except Exception:
-            try:
-                # Try system fonts
-                import os
-                if os.name == 'nt':  # Windows
-                    font_path = "C:/Windows/Fonts/arial.ttf"
-                else:  # Linux/Unix
-                    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-                return ImageFont.truetype(font_path, size)
-            except Exception:
-                # Default font as last resort
-                logger.warning(f"Using default font for size {size}")
-                return ImageFont.load_default()
+            # Last resort to default font
+            logger.warning(f"System fonts not available, using default font: {e}")
+            title_font = ImageFont.load_default()
+            header_font = ImageFont.load_default()
+            text_font = ImageFont.load_default()
 
-    # Computed properties (users don't need to set these)
-    @property
-    def page_width_px(self) -> int:
-        """Page width in pixels."""
-        return int(self.page_width * self.dpi)
-
-    @property
-    def page_height_px(self) -> int:
-        """Page height in pixels."""
-        return int(self.page_height * self.dpi)
-
-    @property
-    def margin_px(self) -> int:
-        """Margin in pixels."""
-        return int(self.margin * self.dpi)
-
-    @property
-    def image_width_px(self) -> int:
-        """Image width in pixels."""
-        return int(self.image_width * self.dpi)
-
-    @property
-    def image_height_px(self) -> int:
-        """Image height in pixels."""
-        return int(self.image_height * self.dpi)
-
-    @property
-    def spacing_px(self) -> int:
-        """Spacing in pixels."""
-        return int(self.spacing * self.dpi)
-
-    @property
-    def padding_px(self) -> int:
-        """Padding in pixels."""
-        return int(self.padding * self.dpi)
+    def __post_init__(self):
+        # Ensure output directory exists
+        self.output_base_path.mkdir(parents=True, exist_ok=True)
 
 
 # %% ------------------------------------ Helper Functions ------------------------------------ #
@@ -252,7 +235,7 @@ def calculate_dynamic_page_height(
     config: PDFGeneratorConfig
 ) -> int:
     """
-    Calculate dynamic page height based on number of colonies for a gene.
+    Calculate dynamic page height based on number of colonies for a gene with high resolution.
 
     Args:
         gene_records: List of gene records for this gene (all have same gene_num)
@@ -261,23 +244,33 @@ def calculate_dynamic_page_height(
     Returns:
         Height in pixels
     """
+    # Base height for header, summary, and spacing (in pixels at 300 DPI)
+    base_height = int(3 * config.dpi)  # 2 inches for title + summary
+
+    # Height per row: image height + gene info text + padding + borders
+    gene_info_height = int(0.5 * config.dpi)  # 0.3 inches for gene info text
+    row_height = max(
+        config.image_height,
+        gene_info_height
+    ) + int(0.3 * config.dpi)  # Add padding between rows
+
+    # Calculate height based on number of colonies
     num_colonies = len(gene_records)
-
-    # Height components (in inches)
-    title_height = 1.0      # Space for title and summary
-    header_height = 0.4       # Table header
-    row_height = max(config.image_height, 0.3) + 0.1  # Image or text height + padding
     content_height = row_height * num_colonies
-    spacing = 0.5            # Extra spacing
 
-    # Total height in inches
-    total_height_inches = title_height + header_height + content_height + spacing
+    # Add header row
+    header_height = int(0.4 * config.dpi)  # 0.2 inches for table headers
 
-    # Minimum height of 4 inches
-    total_height_inches = max(total_height_inches, 4.0)
+    # Total height
+    total_height = base_height + header_height + content_height + int(0.5 * config.dpi)  # Extra spacing
 
-    # Convert to pixels
-    return int(total_height_inches * config.dpi)
+    # Set minimum height for very small genes
+    min_height = int(4.0 * config.dpi)  # 4 inches minimum
+    total_height = max(total_height, min_height)
+
+    # logger.debug(f"Gene with {num_colonies} colonies: calculated height = {total_height} pixels ({total_height/config.dpi:.2f} inches)")
+
+    return total_height
 
 
 @logger.catch
@@ -367,10 +360,10 @@ def create_gene_page_pil(
     temp_output_path = config.output_base_path / f"temp_gene_{gene_num}_page_{page_index}.png"
 
     # Create high quality image with white background
-    img = PILImage.new('RGB', (config.page_width_px, page_height), 'white')
+    img = PILImage.new('RGB', (config.page_width, page_height), 'white')
     draw = ImageDraw.Draw(img)
 
-    current_y = config.margin_px
+    current_y = config.margin
 
     # Draw title on single line with better formatting
     num_colonies = len(gene_records)
@@ -388,11 +381,11 @@ def create_gene_page_pil(
     round_width = draw.textlength(round_text, font=regular_font)
     gene_width = draw.textlength(gene_text, font=bold_font)
     page_width = draw.textlength(page_text, font=regular_font)
-    gap_width = int(0.4 * config.dpi)  # Gap between sections
+    gap_width = 40  # Gap between sections
 
     # Calculate starting position for centering
     total_title_width = round_width + gap_width + gene_width + gap_width + page_width
-    start_x = (config.page_width_px - total_title_width) // 2
+    start_x = (config.page_width - total_title_width) // 2
 
     # Draw title components on single line
     current_x = start_x
@@ -402,69 +395,55 @@ def create_gene_page_pil(
     current_x += gene_width + gap_width
     draw.text((current_x, current_y), page_text, font=regular_font, fill="black")
 
-    current_y += config.spacing_px
+    current_y += int(0.25 * config.dpi)  # 0.25 inch spacing
 
     # Draw horizontal line for separation
     line_y = current_y + int(0.05 * config.dpi)
     draw.line(
-        [(config.margin_px, line_y), (config.page_width_px - config.margin_px, line_y)],
-        fill=config.border_color, width=3
+        [(config.margin, line_y), (config.page_width - config.margin, line_y)],
+        fill=config.outer_border_color, width=config.outer_border_width
     )
-    current_y = line_y + config.spacing_px
+    current_y = line_y + int(0.1 * config.dpi)  # 0.1 inch spacing
 
     # Define column structure: gene_info + 4 time_points + 5 replica_markers = 10 columns
     time_point_columns = ['3d', '4d', '5d', '6d']
     replica_columns = ['YES', 'HYG', 'NAT', 'LEU', 'ADE']
     all_columns = ['Gene Info'] + time_point_columns + replica_columns
 
-    # Calculate column widths with safety checks
+    # Calculate column widths - distribute available width with better proportions
     usable_width = config.page_width - 2 * config.margin
-    gene_info_width_px = int(config.gene_info_width * config.dpi)
-
-    # Ensure usable width is positive and sufficient
-    if usable_width <= gene_info_width_px:
-        logger.warning(f"Usable width ({usable_width:.1f}) too small for gene info width ({gene_info_width_px}px)")
-        # Fall back to reasonable proportions
-        gene_info_width_px = int(usable_width * 0.35)  # Use 35% for gene info
-        remaining_width = usable_width - gene_info_width_px
-    else:
-        remaining_width = usable_width - gene_info_width_px
-
-    # Calculate image column width with minimum protection
-    image_col_width = max(remaining_width // 9, 50)  # At least 50 pixels per column
-
-    logger.debug(f"Layout: usable={usable_width:.1f}, gene_info={gene_info_width_px}px, image_col={image_col_width}px")
+    gene_info_width = int(3.0 * config.dpi)  # 3.0 inches for gene info
+    image_col_width = (usable_width - gene_info_width) // 9  # Remaining width for 9 image columns
 
     # Calculate row height
-    gene_info_height = 0.3  # inches for gene info text
-    row_height = max(config.image_height, gene_info_height) + config.spacing
+    gene_info_height = int(0.3 * config.dpi)  # 0.3 inches for gene info text
+    row_height = max(config.image_height, gene_info_height) + int(0.1 * config.dpi)  # Add padding
 
     # Draw table headers with background
-    header_height = 0.3  # inches
-    header_height_px = int(header_height * config.dpi)
-    current_x = config.margin_px
+    header_height = int(0.3 * config.dpi)
+    current_x = config.margin
 
     # Draw header background
     draw.rectangle(
-        [config.margin_px, current_y, config.page_width_px - config.margin_px, current_y + header_height_px],
+        [config.margin, current_y, config.page_width - config.margin, current_y + header_height],
         fill="#f0f0f0"
     )
 
     # Draw header text centered in each column
     for col_name in all_columns:
-        col_width = gene_info_width_px if col_name == 'Gene Info' else image_col_width
+        col_width = gene_info_width if col_name == 'Gene Info' else image_col_width
         text_bbox = draw.textbbox((0, 0), col_name, font=config.header_font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
 
         # Center text in column
         text_x = current_x + (col_width - text_width) // 2
-        text_y = current_y + (header_height_px - text_height) // 2
+        text_y = current_y + (header_height - text_height) // 2
 
         draw.text((text_x, text_y), col_name, fill="black", font=config.header_font)
         current_x += col_width
 
-    current_y += header_height_px + 3  # 3 pixels for grid line
+    current_y += header_height + config.border_width
 
     # Draw table grid and content
     for row_idx, record in enumerate(gene_records):
@@ -500,63 +479,69 @@ def create_gene_page_pil(
         phenotype_category = str(phenotype_category)
         essentiality = str(essentiality)
 
-        # Row height in pixels
-        row_height_px = int(row_height * config.dpi)
-
         # Draw row background (alternating colors for readability)
         if row_idx % 2 == 0:
             draw.rectangle(
-                [config.margin_px, current_y, config.page_width_px - config.margin_px, current_y + row_height_px],
-                fill=config.background_color
+                [config.margin, current_y, config.page_width - config.margin, current_y + row_height],
+                fill="#fafafa"
             )
 
         # Draw gene info with improved layout
-        current_x = config.margin_px + config.padding_px
-        current_y_inner = current_y + config.padding_px
+        current_x = config.margin + config.cell_padding
+        current_y_inner = current_y + config.cell_padding
 
         # First line: Gene, Colony, Date
         line1_text = f"Gene: {record_gene_num} - {record_gene_name}   Colony: {colony_id}   Date: {date}"
         draw.text((current_x, current_y_inner), line1_text, font=config.text_font, fill="black")
-        current_y_inner += int((10 / 72) * config.dpi)  # 10 points line spacing
+        current_y_inner += config.line_spacing
 
         # Second line: Category and Essentiality with bold content
+        # Create bold text by drawing twice with slight offset for emphasis
+        bold_text_font = config.text_font
         category_label = "Category:"
         essentiality_label = "Essentiality:"
+        category_text = f"{category_label} **{phenotype_category}**"
+        essentiality_text = f"{essentiality_label} **{essentiality}**"
 
-        # Draw labels and content with bold effect
-        label_width = draw.textlength(category_label, font=config.text_font)
+        # Combine category and essentiality on same line with gap
         gap_text = "   "
-        gap_width = draw.textlength(gap_text, font=config.text_font)
+        line2_text = f"{category_label} {phenotype_category}{gap_text}{essentiality_label} {essentiality}"
+
+        # Draw labels regular and content slightly darker/bolder
+        # Split line2_text to handle bold formatting manually
+        label_width = draw.textlength(category_label, font=config.text_font)
+        content_width = draw.textlength(f" {phenotype_category}{gap_text}{essentiality_label}", font=config.text_font)
 
         # Draw "Category:" in regular, content in simulated bold
         draw.text((current_x, current_y_inner), category_label, font=config.text_font, fill="black")
+        # Simulate bold by drawing text twice with slight offset
         content_x = current_x + label_width + 5
         draw.text((content_x, current_y_inner), phenotype_category, font=config.text_font, fill="black")
         draw.text((content_x + 1, current_y_inner), phenotype_category, font=config.text_font, fill="black")  # Bold effect
 
         # Draw essentiality
-        essentiality_x = content_x + draw.textlength(f" {phenotype_category}{gap_text}", font=config.text_font) + gap_width
+        essentiality_x = content_x + draw.textlength(f" {phenotype_category}{gap_text}", font=config.text_font) + 5
         draw.text((essentiality_x, current_y_inner), essentiality_label, font=config.text_font, fill="black")
         content_x = essentiality_x + draw.textlength(f"{essentiality_label} ", font=config.text_font)
         draw.text((content_x, current_y_inner), essentiality, font=config.text_font, fill="black")
         draw.text((content_x + 1, current_y_inner), essentiality, font=config.text_font, fill="black")  # Bold effect
 
-        current_y_inner += int((10 / 72) * config.dpi)  # 10 points line spacing
+        current_y_inner += config.line_spacing
 
         # Draw vertical grid lines
-        current_x = config.margin_px + gene_info_width_px
+        current_x = config.margin + gene_info_width
         draw.line(
-            [(current_x, current_y), (current_x, current_y + row_height_px)],
-            fill=config.line_color, width=2
+            [(current_x, current_y), (current_x, current_y + row_height)],
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
         # Draw images for each column with centering
-        current_x = config.margin_px + gene_info_width_px
+        current_x = config.margin + gene_info_width
         for column in time_point_columns + replica_columns:
             # Draw vertical grid line before column
             draw.line(
-                [(current_x, current_y), (current_x, current_y + row_height_px)],
-                fill=config.line_color, width=2
+                [(current_x, current_y), (current_x, current_y + row_height)],
+                fill=config.grid_line_color, width=config.grid_line_width
             )
 
             image_path = get_image_for_gene_colony(df, record_gene_num, record_gene_name, colony_id, date, column)
@@ -566,113 +551,69 @@ def create_gene_page_pil(
                     # Load and resize image with high quality, maintaining aspect ratio
                     with PILImage.open(image_path) as img_colony:
                         # Calculate max dimensions that fit in the cell
-                        max_width = image_col_width - 2*config.padding_px
-                        max_height = row_height_px - 2*config.padding_px
+                        max_width = image_col_width - 2*config.cell_padding
+                        max_height = row_height - 2*config.cell_padding
 
                         # Get original dimensions
                         original_width, original_height = img_colony.size
 
-                        logger.debug(f"Image {image_path.name}: original={original_width}x{original_height}, max_cell={max_width}x{max_height}")
-
                         # Calculate scaling factor to fit within max dimensions while maintaining aspect ratio
-                        if original_width <= 0 or original_height <= 0:
-                            logger.error(f"Invalid original dimensions for {image_path}: {original_width}x{original_height}")
-                            continue
-
-                        scale_x = max_width / original_width if original_width > 0 else 0
-                        scale_y = max_height / original_height if original_height > 0 else 0
+                        scale_x = max_width / original_width
+                        scale_y = max_height / original_height
                         scale = min(scale_x, scale_y)  # Use the smaller scale to ensure both dimensions fit
 
-                        if scale <= 0:
-                            logger.warning(f"Invalid scale {scale} for {image_path}, using minimum size")
-                            scale = 0.1  # Minimum scale to prevent zero dimensions
-
-                        logger.debug(f"Scale: {scale:.3f}, calculated size: {int(original_width * scale)}x{int(original_height * scale)}")
-
-                        # Calculate new dimensions with minimum size constraints
+                        # Calculate new dimensions
                         new_width = int(original_width * scale)
                         new_height = int(original_height * scale)
 
-                        # Ensure minimum sizes to prevent 0-dimension errors
-                        min_width = 10  # Minimum 10 pixels
-                        min_height = 10  # Minimum 10 pixels
-                        new_width = max(new_width, min_width)
-                        new_height = max(new_height, min_height)
-
-                        # Ensure we don't exceed cell boundaries
-                        new_width = min(new_width, max_width)
-                        new_height = min(new_height, max_height)
-
-                        # Final safety check
-                        if new_width <= 0 or new_height <= 0:
-                            logger.warning(f"Calculated invalid size {new_width}x{new_height} for {image_path}, using minimum")
-                            new_width = min_width
-                            new_height = min_height
-
-                        logger.debug(f"Final size for {image_path.name}: {new_width}x{new_height}")
-
-                        # Ensure all dimensions are integers for Pillow
-                        new_width_int = max(1, int(new_width))  # Minimum 1 pixel
-                        new_height_int = max(1, int(new_height))  # Minimum 1 pixel
-
                         # Resize with high quality maintaining aspect ratio
-                        img_colony = img_colony.resize((new_width_int, new_height_int), PILImage.Resampling.LANCZOS)
+                        img_colony = img_colony.resize((new_width, new_height), PILImage.Resampling.LANCZOS)
 
-                        # Center image in cell with integer coordinates
-                        img_x = current_x + max(0, (image_col_width - new_width_int) // 2)
-                        img_y = current_y + max(0, (row_height_px - new_height_int) // 2)
+                        # Center image in cell
+                        img_x = current_x + (image_col_width - new_width) // 2
+                        img_y = current_y + (row_height - new_height) // 2
 
-                        # Ensure paste coordinates are integers and within bounds
-                        img_x_int = max(0, int(img_x))
-                        img_y_int = max(0, int(img_y))
-
-                        img.paste(img_colony, (img_x_int, img_y_int))
+                        img.paste(img_colony, (img_x, img_y))
                 except Exception as e:
                     logger.error(f"Error adding image {image_path}: {e}")
-                    # Draw "Error" text centered with integer coordinates
+                    # Draw "Error" text centered
                     error_text = "Error"
                     text_bbox = draw.textbbox((0, 0), error_text, font=config.text_font)
                     text_width = text_bbox[2] - text_bbox[0]
                     text_height = text_bbox[3] - text_bbox[1]
-                    text_x = current_x + max(0, (image_col_width - text_width) // 2)
-                    text_y = current_y + max(0, (row_height_px - text_height) // 2)
-                    # Ensure text coordinates are integers
-                    text_x_int = int(text_x)
-                    text_y_int = int(text_y)
-                    draw.text((text_x_int, text_y_int), error_text, fill="red", font=config.text_font)
+                    text_x = current_x + (image_col_width - text_width) // 2
+                    text_y = current_y + (row_height - text_height) // 2
+                    draw.text((text_x, text_y), error_text, fill="red", font=config.text_font)
             else:
-                # Draw "No Image" text centered with integer coordinates
+                # Draw "No Image" text centered
                 no_image_text = "No Image"
                 text_bbox = draw.textbbox((0, 0), no_image_text, font=config.text_font)
                 text_width = text_bbox[2] - text_bbox[0]
                 text_height = text_bbox[3] - text_bbox[1]
-                text_x = current_x + max(0, (image_col_width - text_width) // 2)
-                text_y = current_y + max(0, (row_height_px - text_height) // 2)
-                # Ensure text coordinates are integers
-                text_x_int = int(text_x)
-                text_y_int = int(text_y)
-                draw.text((text_x_int, text_y_int), no_image_text, fill="#808080", font=config.text_font)
+                text_x = current_x + (image_col_width - text_width) // 2
+                text_y = current_y + (row_height - text_height) // 2
+                draw.text((text_x, text_y), no_image_text, fill="#808080", font=config.text_font)
 
             current_x += image_col_width
 
         # Draw final vertical line
         draw.line(
-            [(current_x, current_y), (current_x, current_y + row_height_px)],
-            fill=config.line_color, width=2
+            [(current_x, current_y), (current_x, current_y + row_height)],
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
         # Draw horizontal line for row
         draw.line(
-            [(config.margin_px, current_y + row_height_px), (config.page_width_px - config.margin_px, current_y + row_height_px)],
-            fill=config.line_color, width=2
+            [(config.margin, current_y + row_height), (config.page_width - config.margin, current_y + row_height)],
+            fill=config.grid_line_color, width=config.grid_line_width
         )
 
-        current_y += row_height_px
+        current_y += row_height
 
     # Draw outer border
     draw.rectangle(
-        [config.margin_px, config.margin_px, config.page_width_px - config.margin_px, current_y],
-        outline=config.border_color, width=3
+        [config.margin, config.margin, config.page_width - config.margin, current_y],
+        outline=config.outer_border_color, width=config.outer_border_width
     )
 
     # Save as high-quality PNG first (300 DPI)
