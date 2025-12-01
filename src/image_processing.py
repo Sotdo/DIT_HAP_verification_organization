@@ -140,7 +140,12 @@ def crop_to_circle(
     if circles is None:
         raise ValueError(f"No circle detected in image: {image}")
     else:
-        sorted_circles = sorted(circles, key=lambda c: (int(c[1]//500), int(c[0]//500)))
+        sorted_keys = [(int(c[1]//600), int(c[0]//600)) for c in circles]
+        xs = set([c[1] for c in sorted_keys])
+        ys = set([c[0] for c in sorted_keys])
+        if len(ys) != 3:
+            logger.error(f"Expected 3 rows of plates, but detected {len(ys)} rows in image: {image}")
+        sorted_circles = sorted(circles, key=lambda c: (int(c[1]//600), int(c[0]//600)))
         for c in sorted_circles:
             x, y = int(c[0]), int(c[1])
             x1, x2 = max(0, x - radius), min(img.shape[1], x + radius)
