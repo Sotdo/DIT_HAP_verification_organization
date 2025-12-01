@@ -780,6 +780,39 @@ def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = 
         logger.error(f"Error reading verification table file: {e}")
 
 
+@logger.catch
+def generate_pdf_for_given_genes(
+    config: PDFGeneratorConfig,
+    gene_nums: list[int]
+):
+    """Generate PDFs for specified genes in a round."""
+    # Find verification table file
+    verification_file = config.table_structures_path / "all_rounds_combined_verification_summary.xlsx"
+
+    if not verification_file.exists():
+        logger.error(f"Verification table file not found: {verification_file}")
+        return
+
+    try:
+        # Read the specific round sheet from Excel file
+        df = pd.read_excel(verification_file)
+        if df.empty:
+            logger.error("No data found for combined verification table")
+            return
+
+        # Filter DataFrame for specified gene numbers
+        df_filtered = df[df['gene_num'].astype(int).isin(gene_nums)]
+        if df_filtered.empty:
+            logger.error("No matching genes found for specified gene numbers in combined verification table")
+            return
+
+        logger.info(f"Generating PDF for genes {gene_nums} in combined verification table")
+        file_name = f"combined_{'_'.join(map(str, gene_nums[:3]))}_etc" if len(gene_nums) > 3 else f"combined_{'_'.join(map(str, gene_nums))}"
+        create_verification_pdf(df_filtered, config, file_name)
+
+    except Exception as e:
+        logger.error(f"Error generating PDF for specified genes: {e}")
+
 if __name__ == "__main__":
     # Example usage
     config = PDFGeneratorConfig()
