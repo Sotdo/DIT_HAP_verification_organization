@@ -45,9 +45,16 @@ class BatchConfig:
 logger.remove()
 logger.add(
     sys.stdout,
-    colorize=False,
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20}:{line:<5} | {message}",
+    colorize=True,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{module:<20}</cyan>:{line:<4} | <level>{message}</level>",
     level="DEBUG"
+)
+
+logger.add(
+    Path("../logs/batch_crop_image.log"),
+    colorize=False,
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20}:{line:<4} | {message}",
+    level="DEBUG",
 )
 
 # %% ------------------------------------ Functions ------------------------------------ #
