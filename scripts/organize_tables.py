@@ -82,7 +82,53 @@ class OrganizeTablesConfig:
             307
         ]
     )
-
+    genes: list[str] = field(default_factory=lambda: [
+        "num1",
+        "ymr1",
+        "nup155",
+        "isu1",
+        "shr3",
+        "fmo1",
+        "msn5",
+        "isp6",
+        "phi1",
+        "eft202",
+        "rps2802",
+        "gly1",
+        "dbl8",
+        "sca1",
+        "pma2",
+        "zrt1",
+        "csn5",
+        "pus7",
+        "rec8",
+        "rpl401",
+        "mal1",
+        "dsc2",
+        "hul6",
+        "SPCC24B10.18",
+        "ctr6",
+        "meu31",
+        "pyp3",
+        "rgf1",
+        "SPAC4C5.03",
+        "SPAC977.03",
+        "SPCC594.04c",
+        "fub1",
+        "thp1",
+        "mam2",
+        "cgi121",
+        "meu23",
+        "SPCC4G3.12c",
+        "erm2",
+        "fma1",
+        "rqt3",
+        "rps1701",
+        "vps901",
+        "rdl1",
+        "SPCC594.02c",
+    ]) 
+    
     def __post_init__(self):
         # Ensure output directories exist
         self.table_config.output_path.mkdir(parents=True, exist_ok=True)
@@ -132,10 +178,15 @@ def process_pdfs(config: OrganizeTablesConfig):
     if config.gene_nums:
         logger.info(f"Generating PDFs for specified gene numbers: {config.gene_nums}")
         try:
-            generate_pdf_for_given_genes(config.pdf_config, config.gene_nums)
+            generate_pdf_for_given_genes(config.pdf_config, config.gene_nums, use_num_or_name=True)
         except Exception as e:
             logger.error(f"Error generating PDF for gene number {config.gene_nums}: {e}")
-
+    if config.genes:
+        logger.info(f"Generating PDFs for specified gene names: {config.genes}")
+        try:
+            generate_pdf_for_given_genes(config.pdf_config, config.genes, use_num_or_name=False)
+        except Exception as e:
+            logger.error(f"Error generating PDF for gene name {config.genes}: {e}")
 
 @logger.catch
 def create_sample_data(config: OrganizeTablesConfig):
@@ -221,10 +272,8 @@ def setup_logging(config: OrganizeTablesConfig):
     )
 
     # Add file logging
-    log_file = config.output_base_path / "table_organization.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
     logger.add(
-        log_file,
+        Path("../logs/organize_tables.log"),
         colorize=False,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20} | {message}",
         level="DEBUG",
