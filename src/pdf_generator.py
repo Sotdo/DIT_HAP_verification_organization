@@ -783,7 +783,8 @@ def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = 
 @logger.catch
 def generate_pdf_for_given_genes(
     config: PDFGeneratorConfig,
-    gene_nums: list[int]
+    genes: list[int],
+    use_num_or_name: bool = True
 ):
     """Generate PDFs for specified genes in a round."""
     # Find verification table file
@@ -801,13 +802,17 @@ def generate_pdf_for_given_genes(
             return
 
         # Filter DataFrame for specified gene numbers
-        df_filtered = df[df['gene_num'].astype(int).isin(gene_nums)]
+        if use_num_or_name:
+            df_filtered = df[df['gene_num'].astype(int).isin(genes)]
+        else:
+            df_filtered = df[df['gene_name'].isin(genes)]
+        
         if df_filtered.empty:
-            logger.error("No matching genes found for specified gene numbers in combined verification table")
+            logger.error("No matching genes found for specified genes in combined verification table")
             return
 
-        logger.info(f"Generating PDF for genes {gene_nums} in combined verification table")
-        file_name = f"combined_{'_'.join(map(str, gene_nums[:3]))}_etc" if len(gene_nums) > 3 else f"combined_{'_'.join(map(str, gene_nums))}"
+        logger.info(f"Generating PDF for genes {genes} in combined verification table")
+        file_name = f"combined_{'_'.join(map(str, genes[:3]))}_etc" if len(genes) > 3 else f"combined_{'_'.join(map(str, genes))}"
         create_verification_pdf(df_filtered, config, file_name)
 
     except Exception as e:
