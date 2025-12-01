@@ -145,6 +145,8 @@ def crop_to_circle(
         ys = set([c[0] for c in sorted_keys])
         if (REPLICA_NAME in image.stem) and len(ys) != 3:
             logger.error(f"Expected 3 rows of plates, but detected {len(ys)} rows in image: {image}")
+        elif "56_hal3_YHZAY2A_#2_202411" == image.stem and len(ys) == 2:
+            logger.warning("The raw image missing YES plate")
         sorted_circles = sorted(circles, key=lambda c: (int(round(c[1]/1000)), int(round(c[0]/600))))
         for c in sorted_circles:
             x, y = int(c[0]), int(c[1])
@@ -352,6 +354,16 @@ def process_tetrad_images(
                 elif len(plates) > 5:
                     logger.error(f"More than 5 plates detected in image: {img_path}, skipping.")
                     failed_images.append(img_path)
+                elif len(plates) < 5:
+                    if "56_hal3_YHZAY2A_#2_202411" in img_path.stem:
+                        logger.warning("The raw image missing YES plate")
+                        for idx, plate in enumerate(plates):
+                            replica_plate_name = REPLICA_PLATES_ORDER.get(idx+1)
+                            img_name = img_path.stem.replace(REPLICA_NAME, replica_plate_name)
+                            plates_with_path[img_name] = plate
+                    else:
+                        logger.error(f"Less than 5 plates detected in image: {img_path}, skipping.")
+                        failed_images.append(img_path)
             else:
                 if len(plates) == 1:
                     plate = plates[0]
