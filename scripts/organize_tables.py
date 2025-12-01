@@ -59,11 +59,11 @@ class OrganizeTablesConfig:
     )
 
     # Processing options
-    process_tables: bool = False
+    process_tables: bool = True
     generate_pdfs: bool = True
     create_samples: bool = False
-    # rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
-    rounds_to_process: list[str] = field(default_factory=lambda: ["18th_round"])  # Empty = all rounds
+    rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
+    # rounds_to_process: list[str] = field(default_factory=lambda: ["18th_round"])  # Empty = all rounds
     gene_nums: list[int] = field(default_factory=lambda: [
             243,
             249,
@@ -277,8 +277,7 @@ def setup_logging(config: OrganizeTablesConfig):
         colorize=False,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20} | {message}",
         level="DEBUG",
-        rotation="10 MB",
-        retention="7 days"
+        mode="w"
     )
 
     logger.info("Table organization logging initialized")

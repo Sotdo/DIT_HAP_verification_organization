@@ -55,6 +55,7 @@ logger.add(
     colorize=False,
     format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {module:<20}:{line:<4} | {message}",
     level="DEBUG",
+    mode="w"
 )
 
 # %% ------------------------------------ Functions ------------------------------------ #
