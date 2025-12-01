@@ -18,6 +18,7 @@ from table_organizer import (
 from pdf_generator import (
     PDFGeneratorConfig,
     generate_round_pdfs as generate_pdf_rounds,
+    generate_pdf_for_given_genes,
 )
 
 
@@ -61,7 +62,26 @@ class OrganizeTablesConfig:
     process_tables: bool = False
     generate_pdfs: bool = True
     create_samples: bool = False
-    rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
+    # rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
+    rounds_to_process: list[str] = field(default_factory=lambda: ["18th_round"])  # Empty = all rounds
+    gene_nums: list[int] = field(default_factory=lambda: [
+            243,
+            249,
+            255,
+            256,
+            262,
+            265,
+            273,
+            279,
+            280,
+            281,
+            292,
+            296,
+            297,
+            300,
+            307
+        ]
+    )
 
     def __post_init__(self):
         # Ensure output directories exist
@@ -108,6 +128,13 @@ def process_pdfs(config: OrganizeTablesConfig):
     else:
         logger.info("Generating PDFs for all rounds with table structures...")
         generate_pdf_rounds(config.pdf_config)
+    
+    if config.gene_nums:
+        logger.info(f"Generating PDFs for specified gene numbers: {config.gene_nums}")
+        try:
+            generate_pdf_for_given_genes(config.pdf_config, config.gene_nums)
+        except Exception as e:
+            logger.error(f"Error generating PDF for gene number {config.gene_nums}: {e}")
 
 
 @logger.catch
