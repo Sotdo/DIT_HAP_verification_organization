@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the **DIT_HAP_verification_organization** project, which focuses on processing and organizing DIT-HAP (Deletion-Induced Transcriptional Homeostasis and Asynchronous Progression) verification data for fission yeast (*Schizosaccharomyces pombe*) experiments. The project handles image processing pipeline for tetrad and replica plates, gene verification data management, and systematic file organization for high-throughput screening experiments.
+This is the **DIT_HAP_verification_organization** project, which focuses on processing and organizing DIT-HAP (Deletion-Induced Transcriptional Homeostasis and Asynchronous Progression) verification data for fission yeast (*Schizosaccharomyces pombe*) experiments. The project provides an automated image processing pipeline for high-throughput yeast colony detection, plate processing, gene verification data management, and systematic file organization.
 
 ## Core Architecture
 
@@ -19,7 +19,6 @@ This is the **DIT_HAP_verification_organization** project, which focuses on proc
   - Enhanced CLAHE parameters for improved contrast and colony detection
   - Progress tracking with tqdm for batch processing operations
   - Performance optimizations: memory efficiency, error handling, and graceful degradation
-  - One-line function documentation following template standards
 
 - **`src/utils.py`**: Data management classes and configuration
   - `verificationMetadata`: Handles gene verification metadata from Excel files
@@ -31,6 +30,17 @@ This is the **DIT_HAP_verification_organization** project, which focuses on proc
   - Integration with gene metadata for meaningful file names
   - Support for different experimental rounds and timepoints
 
+- **`src/table_organizer.py`**: Table structure organization and data processing
+  - Quality assessment for cropped images
+  - Verification table creation with comprehensive metadata
+  - Multi-format export capabilities (CSV, Excel, JSON)
+  - Integration with gene verification data
+
+- **`src/pdf_generator.py`**: PDF document generation
+  - Formatted PDF creation for verification reports
+  - Gene-specific PDF generation with customizable layouts
+  - Integration with table organization results
+
 ### Directory Structure
 
 ```
@@ -39,242 +49,178 @@ DIT_HAP_verification_organization/
 │   ├── image_processing.py   # OpenCV-based colony detection and plate processing
 │   ├── utils.py             # Data classes and configuration management
 │   ├── rename_functions.py  # File renaming utilities
+│   ├── table_organizer.py   # Table structure organization and PDF generation
+│   ├── pdf_generator.py     # PDF generation functionality
 │   └── __init__.py
 ├── scripts/                  # Execution scripts
 │   ├── rename_image_names.py # Main renaming workflow
-│   └── batch_crop_image.py  # Enhanced batch image cropping interface with template-style architecture
-├── TEMPLATE.py               # Template script for new development
+│   ├── batch_crop_image.py  # Enhanced batch image cropping interface
+│   └── organize_tables.py   # Table organization and PDF generation workflow
 ├── resource/                 # Data and reference files
 │   ├── Hayles_2013_OB_merged_categories_sysIDupdated.xlsx
 │   ├── all_for_verification_genes_by_round.xlsx
 │   └── gene_IDs_names_products/
-└── requirements.txt          # Python dependencies
+├── results/                  # Output directory
+│   └── merged_pdfs/
+├── TEMPLATE.py               # Template script for new development
+├── requirements.txt          # Python dependencies
+├── README.md                # Project documentation
+├── PROMPT.md                # Function request framework
+└── README_Task3.md          # Task-specific documentation
 ```
 
-## Common Development Tasks
+## Essential Commands and Workflows
 
-### Setting up the Environment
+### Environment Setup
 
-The project uses a dedicated mamba environment named "opencv" for development:
+**Critical: Always use the opencv environment for development**
 
 ```bash
-# Activate the opencv environment
+# Activate the opencv environment (REQUIRED)
 mamba activate opencv
 
-# Verify Python path
-which python  # Should show: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
-
-# Install dependencies (if not already installed)
-pip install -r requirements.txt
-```
-
-**Important**: Always activate the "opencv" environment before running any scripts or performing development work.
-
-**Environment Activation Methods**:
-
-**Method 1: Using mamba (preferred)**:
-```bash
-mamba activate opencv
-```
-
-**Method 2: Using PATH export** (if mamba activation doesn't work):
-```bash
-export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH"
-```
-
-**Python Path Verification**:
-```bash
-# Verify you're using the correct Python environment
+# Verify correct Python environment
 which python
 # Should output: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
 
-# Test dependencies
-python -c "import cv2, numpy, pandas, tqdm, openpyxl; print('All dependencies available')"
+# Test core dependencies
+python -c "import cv2, numpy, pandas, tqdm, openpyxl, loguru; print('Environment OK')"
+
+# Install dependencies if needed (only run from opencv environment)
+pip install -r requirements.txt
 ```
 
-**Running Scripts with Correct Environment**:
+**Alternative Environment Methods** (if mamba activation fails):
 ```bash
-# Method 1: Activate environment first, then run
-mamba activate opencv
+# Method 2: Direct PATH export
+export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH"
+
+# Method 3: Full Python path for commands
+/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python <script>
+```
+
+### Main Processing Workflows
+
+#### 1. Image Processing Pipeline
+```bash
+# Process tetrad and replica plate images (primary workflow)
+python scripts/batch_crop_image.py
+
+# Custom image processing with specific parameters
+python scripts/batch_crop_image.py --custom-config
+```
+
+#### 2. File Renaming System
+```bash
+# Rename all experimental images with systematic conventions
 python scripts/rename_image_names.py
-
-# Method 2: Use PATH export in single command
-export PATH="/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin:$PATH" && python scripts/rename_image_names.py
-
-# Method 3: Use full Python path
-/data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python scripts/rename_image_names.py
 ```
 
-### Research Code Principles and Architecture
-
-This project follows **research code principles** rather than production engineering:
-
-#### Simplicity and Modern Python:
-- **Dataclasses**: Use `@dataclass` for simple configuration management, not complex inheritance hierarchies
-- **Type Hints**: Include type annotations for clarity without over-engineering
-- **Clear Functions**: One purpose per function, minimal abstraction layers
-- **Direct Parameters**: Pass parameters directly rather than complex configuration objects
-- **Modern Features**: Use pathlib, f-strings, and other modern Python features
-- **Type Hint Guidelines**:
-  - Use `dict` instead of `Dict` for general-purpose dictionaries
-  - Use `list` instead of `List` for general-purpose lists
-  - Use `str` instead of `str` for string types
-  - Use `int`, `float` for numeric types
-  - Use `bool` for boolean types
-  - Use `Optional[type]` for nullable types
-
-#### Code Organization:
-- **Avoid Redundancy**: Don't duplicate configuration between `batch_crop_image.py` and `image_processing.py`
-- **Simple Imports**: Standard library → Third-party → Project-specific with clear path handling
-- **Minimal Dependencies**: Only import what's needed for the core functionality
-- **Research-Focused**: Code should be easy to modify and experiment with, not locked into rigid patterns
-
-#### Recent Simplifications:
-- **Removed Over-Engineering**: Eliminated complex configuration class hierarchies
-- **Direct Function Calls**: Simplified `batch_crop_image.py` to directly call processing functions
-- **Streamlined image_processing.py**: Focus on core OpenCV functionality without excessive abstraction
-- **Clean Configuration**: Single dataclass with clear parameter names
-
-### Type Hint Guidelines
-
-For consistent type hints across the codebase:
-
-- **Use `dict` instead of `Dict`** for general-purpose dictionaries
-- **Use `list` instead of `List`** for general-purpose lists
-- **Use `str` instead of `str`** for string types
-- **Use `int`, `float`** for numeric types
-- **Use `bool`** for boolean types
-- **Use `Optional[type]`** for nullable types
-
-```python
-# Preferred type hints
-def process_data(
-    data: dict[str, int],  # Not Dict[str, int]
-    items: list[str],        # Not List[str]
-    enabled: bool = True
-) -> Optional[str]:         # Not Optional[str] for return types
-    return result if condition else None
+#### 3. Table Organization and PDF Generation
+```bash
+# Create verification tables and generate PDF reports
+python scripts/organize_tables.py
 ```
 
-### Creating New Research Scripts
+### Research Script Development
 
-For research code, prioritize simplicity and modularity over rigid templates:
+**Creating New Research Scripts:**
+```bash
+# Always start from TEMPLATE.py for new scripts
+cp TEMPLATE.py scripts/my_new_script.py
+# Then modify the new script following research code principles
+```
 
-#### Simple Research Script Structure:
-
+**Custom Image Processing Example:**
 ```python
 """
-Brief description of what this research script does.
-Usage: python scripts/research_script.py
+Custom research script for specific experimental conditions.
+Usage: python scripts/custom_analysis.py
 """
-
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Tuple, Optional
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent.resolve() / "src"))
+# Add src to path (REQUIRED for all scripts)
+sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-# Import research modules
-from utils import roundConfig
-from image_processing import process_tetrad_images
+from image_processing import process_tetrad_images, ImageProcessingConfig
 
-# Simple configuration with dataclass
 @dataclass
-class Config:
-    """Simple configuration for research experiment."""
+class CustomConfig:
+    """Configuration for custom experiment."""
     target_radius: int = 490
     min_colony_size: int = 50
+    circularity_threshold: float = 0.7
     visualize_colonies: bool = True
 
 def main():
-    """Main function for research experiment."""
-    config = Config()
-    print("Starting research experiment...")
+    config = CustomConfig()
 
-    # Your research logic here
+    # Process with custom parameters
     tetrad_size, radius = process_tetrad_images(
-        input_dir='data/input',
-        output_dir='results/output',
-        **config.__dict__
+        input_dir='data/experimental_tetrad',
+        output_dir='results/custom_output',
+        target_radius=config.target_radius,
+        min_colony_size=config.min_colony_size,
+        circularity_threshold=config.circularity_threshold,
+        visualize_colonies=config.visualize_colonies
     )
 
-    print(f"Completed with size: {tetrad_size}")
+    print(f"Processing complete. Output size: {tetrad_size}px")
 
 if __name__ == '__main__':
     main()
 ```
 
-#### Key Research Code Principles:
-- **Minimal Structure**: Just imports, simple config, main function
-- **Direct Parameters**: Pass parameters directly to functions
-- **Easy Modification**: Parameters should be easy to change for experiments
-- **Clear Purpose**: Each script should do one research task well
-- **No Over-Engineering**: Avoid complex hierarchies and abstractions
-- **Modern Python**: Use dataclasses, pathlib, type hints for clarity
-- **Section Separators**: Use `# %% ------------------------------------ SECTION ------------------------------------ #` only if script gets long
+## Core Configuration and Usage
 
-The goal is code that's easy to understand, modify, and experiment with - not production-grade rigidity.
+### Image Processing Parameters
 
-### Running Image Processing Pipeline
-
-The main image processing workflow is handled through `src/image_processing.py`:
-
+**Tetrad Plate Processing:**
 ```python
-# Process tetrad images
 from src.image_processing import process_tetrad_images
+
 tetrad_output_size, tetrad_radius = process_tetrad_images(
     input_dir='data/tetrad',
     output_dir='results/tetrad_cropped',
-    target_radius=490,  # Optional: auto-calculated if None
+    target_radius=490,              # Plate radius in pixels
+    min_colony_size=50,             # Minimum colony size for tetrads
+    circularity_threshold=0.7,      # Circularity filter for tetrads
     plate_to_tetrad_height_range=(40, 85),
     plate_to_tetrad_width_range=(10, 95),
     final_tetrad_height_percent=30,
     final_tetrad_width_percent=75,
-    min_colony_size=50,
-    circularity_threshold=0.7,
     visualize_colonies=True
 )
+```
 
-# Process replica images
+**Replica Plate Processing:**
+```python
 from src.image_processing import process_replica_images
+
 process_replica_images(
     input_dir='data/replica',
     output_dir='results/replica_cropped',
-    final_output_size_px=tetrad_output_size,
-    tetrad_crop_radius=tetrad_radius,
-    min_colony_size=25,  # Smaller colonies on replica plates
-    circularity_threshold=0.6
+    final_output_size_px=tetrad_output_size,  # Sync with tetrad output
+    tetrad_crop_radius=tetrad_radius,          # Sync with tetrad radius
+    min_colony_size=25,                        # Smaller colonies on replicas
+    circularity_threshold=0.6                  # More lenient for replicas
 )
 ```
 
-### Batch File Renaming
+### Data Management Classes
 
-To rename experimental images using systematic conventions:
-
-```bash
-# Run the renaming script from project root
-python scripts/rename_image_names.py
-```
-
-**Important**: Always run scripts from the project root directory to ensure correct relative paths for resource files. The `src/` modules expect to be run from the project root where `resource/` directory is accessible.
-
-This script:
-- Processes all experimental rounds automatically
-- Renames images with format: `{gene_num}_{gene_name}_{day_or_marker}_{colony_id}_{date}`
-- Integrates with gene metadata from PomBase
-- Requires resource files to be present in `resource/` directory
-
-### Configuration Management
-
-The project uses dataclasses for configuration:
-
+**Gene Metadata and Verification:**
 ```python
 from src.utils import verificationMetadata, roundConfig
 
 # Load verification metadata
 verification_meta = verificationMetadata()
+
+# Access gene information
+print(verification_meta.num2gene[123])  # Get gene name by number
+print(verification_meta.verification_genes.head())  # View verification data
 
 # Configure round-specific processing
 round_config = roundConfig(
@@ -282,79 +228,199 @@ round_config = roundConfig(
     raw_data_folder_path=Path("/path/to/raw/data"),
     output_folder_path=Path("/path/to/processed/data")
 )
+
+# Access folder structure
+print(round_config.all_sub_folders["3d"]["input"])   # Raw 3-day images
+print(round_config.all_sub_folders["3d"]["output"])  # Processed 3-day images
 ```
 
-## Key Dependencies
+### Table Organization and PDF Generation
 
-- **OpenCV (`opencv-python`)**: Core image processing and computer vision
-- **NumPy**: Numerical operations and array handling
-- **Pandas**: Data manipulation for gene metadata
-- **tqdm**: Progress bars for batch processing
-- **openpyxl**: Excel file reading for verification data
+**Table Processing Configuration:**
+```python
+from src.table_organizer import TableConfig, process_all_rounds
+from src.pdf_generator import PDFGeneratorConfig, generate_round_pdfs
 
-## Data Processing Workflow
+# Table organization
+table_config = TableConfig(
+    base_path=Path("/path/to/cropped/images"),
+    output_path=Path("../results")
+)
 
-1. **Image Acquisition**: Raw microscopy images stored in round-specific directories
-2. **Plate Detection**: Circle detection to identify individual plates on images
-3. **Colony Detection**: Adaptive thresholding and circularity analysis to find colonies
-4. **Centroid Calculation**: Determine colony centroids for plate alignment
-5. **Image Cropping**: Extract consistently sized regions around colony clusters
-6. **File Organization**: Systematic renaming with gene metadata integration
+# Process all rounds
+process_all_rounds(table_config)
 
-## Code Style and Development Standards
+# PDF generation
+pdf_config = PDFGeneratorConfig(
+    output_path=Path("../results/merged_pdfs"),
+    include_quality_metrics=True
+)
 
-- **Use `TEMPLATE.py`** as the starting point for all new scripts
-- **Import organization**: Standard library → third-party → project-specific modules
-- **Type hints**: Required for all function parameters and return values
-- **Documentation**: Comprehensive docstrings with purpose, usage examples, and input/output descriptions
-- **Configuration**: Use `@dataclass` for configuration management
-- **Path handling**: Use `pathlib.Path` for all file system operations
+# Generate PDFs for specific rounds
+generate_round_pdfs(pdf_config, rounds=["1st_round", "2nd_round"])
+```
+
+## Development Principles and Standards
+
+### Research Code Philosophy
+
+This project follows **research code principles** rather than production engineering:
+
+- **Simplicity over Rigidity**: Prioritize experimental flexibility over rigid architecture
+- **Direct Parameter Passing**: Avoid complex configuration objects, use direct parameters
+- **Easy Modification**: Parameters should be easily configurable for experimental optimization
+- **Modern Python Practices**: Use dataclasses, pathlib, type hints for clarity
+- **Clear Purpose**: Each function serves one clear purpose with minimal abstraction
+
+### Type Hint Guidelines
+
+Use modern Python type hints consistently:
+```python
+# Preferred style (PEP 585+)
+def process_data(
+    data: dict[str, int],      # Not Dict[str, int]
+    items: list[str],          # Not List[str]
+    enabled: bool = True
+) -> Optional[str]:           # Not Optional[str] for return types
+    return result if condition else None
+```
+
+### Code Organization Standards
+
+- **Import Order**: Standard library → Third-party → Project-specific modules
+- **Path Handling**: Use `pathlib.Path` for all file system operations
+- **Error Handling**: Comprehensive error handling with graceful degradation
+- **Documentation**: One-line function documentation with usage examples
+- **Configuration**: Use `@dataclass` for simple configuration management
+
+### Template Usage
+
+**ALWAYS use `TEMPLATE.py`** as the starting point for new scripts:
+- Standardized structure with sections separated by `# %%`
+- Modern Python import organization
+- Dataclass-based configuration
+- Clear separation of concerns
 
 ## Environment Troubleshooting
 
 ### Common Issues and Solutions
 
-1. **Module Import Errors**: Ensure you're running from the project root directory
+1. **Module Import Errors**:
    ```bash
-   # Run from DIT_HAP_verification_organization/ directory, not from src/ or scripts/
+   # Ensure running from project root directory
    pwd  # Should show: /data/c/yangyusheng_optimized/DIT_HAP_verification_organization
+
+   # Verify src directory exists
+   ls src/
    ```
 
-2. **Resource File Not Found**: Check that resource files exist in the correct location
+2. **Wrong Python Environment**:
    ```bash
+   # Check current Python
+   which python
+   # Should show: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
+
+   # Activate correct environment
+   mamba activate opencv
+   ```
+
+3. **Resource File Not Found**:
+   ```bash
+   # Verify resource files exist
    ls resource/all_for_verification_genes_by_round.xlsx
    ls resource/Hayles_2013_OB_merged_categories_sysIDupdated.xlsx
+   ls resource/gene_IDs_names_products/
    ```
 
-3. **Wrong Python Environment**: Verify you're using the opencv environment
+4. **Missing Dependencies**:
    ```bash
-   which python
-   # Should output: /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/python
+   # Install from opencv environment only
+   mamba activate opencv
+   pip install -r requirements.txt
    ```
 
-4. **Missing Dependencies**: Install required packages if needed
+5. **OpenCV Installation Issues**:
    ```bash
-   /data/a/yangyusheng/.local/share/mamba/envs/opencv/bin/pip install -r requirements.txt
+   # Test OpenCV installation
+   python -c "import cv2; print('OpenCV version:', cv2.__version__)"
    ```
 
-### Environment Verification Test
+### Environment Verification
 
-To verify your environment is correctly configured, you can run:
+**Complete Environment Test:**
 ```python
-# Quick environment test
+# Run this to verify full environment setup
 import sys
 sys.path.append('src')
-import cv2, numpy as pandas, tqdm, openpyxl
-print("Environment configured correctly!")
+
+try:
+    import cv2
+    import numpy as np
+    import pandas as pd
+    from tqdm import tqdm
+    import openpyxl
+    from loguru import logger
+    print("✅ All dependencies available!")
+    print(f"OpenCV version: {cv2.__version__}")
+    print(f"NumPy version: {np.__version__}")
+    print(f"Pandas version: {pd.__version__}")
+except ImportError as e:
+    print(f"❌ Missing dependency: {e}")
+    print("Run: pip install -r requirements.txt")
 ```
+
+## Data Processing Pipeline
+
+### Complete Workflow
+
+1. **Image Acquisition**: Raw microscopy images stored in round-specific directories
+2. **Plate Detection**: Circle detection to identify individual plates using Hough transform
+3. **Colony Detection**: Adaptive thresholding and circularity analysis to find colonies
+4. **Centroid Calculation**: Determine colony centroids with outlier detection for plate alignment
+5. **Image Cropping**: Extract consistently sized regions around colony clusters
+6. **File Organization**: Systematic renaming with gene metadata integration
+7. **Table Creation**: Build comprehensive verification tables with quality metrics
+8. **PDF Generation**: Create formatted reports and documentation
+
+### Key Algorithms
+
+- **Hough Circle Detection**: Robust plate identification with parameter optimization
+- **Adaptive Thresholding**: Colony detection optimized for varying contrast conditions
+- **Centroid Alignment**: Outlier detection ensures consistent plate positioning across rounds
+- **CLAHE Enhancement**: Contrast Limited Adaptive Histogram Equalization for improved detection
+- **Synchronized Processing**: Tetrad and replica plates processed with coordinated dimensions
+
+## Critical Requirements and Constraints
+
+### Environment Requirements
+
+- **Python 3.8+** in the "opencv" mamba environment (MANDATORY)
+- **OpenCV 4.x** for image processing operations
+- **Sufficient Memory**: Large image batches require adequate RAM
+- **Disk Space**: Cropped images and processed data require significant storage
+
+### Data Requirements
+
+- **Resource Files**: Must be present in `resource/` directory for gene metadata
+- **Directory Structure**: Specific folder organization expected for raw and processed data
+- **Image Formats**: Supports standard microscopy image formats (PNG, JPG, TIFF)
+- **Naming Conventions**: Systematic filenames required for proper metadata extraction
+
+### Processing Constraints
+
+- **Parameter Tuning**: Colony detection parameters may need adjustment for different experimental conditions
+- **Quality Validation**: Image quality assessment integrated into processing pipeline
+- **Batch Processing**: Memory-efficient processing required for large datasets
+- **Reproducibility**: Consistent parameters and random seeds for scientific reproducibility
 
 # ========================= KeyWord =========================
 
-## Important Notes
+## Important Development Notes
 
-- The project expects specific directory structures for raw and processed data
-- Image processing parameters (colony size, circularity thresholds) may need adjustment for different experimental conditions
-- Gene metadata is sourced from PomBase and essentiality studies
-- The centroid adjustment algorithm helps maintain consistency across multiple plates and rounds
-- Always follow the template structure when creating new scripts to maintain code consistency
-- Always activate the "opencv" mamba environment before running scripts
+- **Environment is Critical**: Always verify you're in the "opencv" environment before any development
+- **Run from Project Root**: All scripts expect to be executed from the repository root directory
+- **Resource Dependencies**: Gene metadata files in `resource/` directory are required for most operations
+- **Research-Focused**: Code designed for experimental flexibility, not production rigidity
+- **Parameter Sensitivity**: Image processing parameters are experiment-dependent and may require tuning
+- **Template Adherence**: Always use `TEMPLATE.py` as the foundation for new scripts
+- **Modern Python**: Leverage dataclasses, pathlib, type hints for clean, maintainable code
