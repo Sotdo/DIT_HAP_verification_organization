@@ -4,3 +4,4 @@ numpy
 pandas
 openpyxl
 opencv-python
+scikit-image
