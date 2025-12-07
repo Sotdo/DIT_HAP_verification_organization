@@ -24,6 +24,7 @@ Usage:
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+import pandas as pd
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -51,13 +52,13 @@ class AnalysisConfig:
     
     # Colony detection - Tetrad plate
     tetrad_gaussian_sigma: float = 1.0
-    tetrad_min_area: int = 30
+    tetrad_min_area: int = 10
     tetrad_split_min_distance: int = 20
     
     # Colony detection - HYG plate  
-    hyg_gaussian_sigma: float = 1
-    hyg_min_area: int = 50
-    hyg_split_min_distance: int = 10
+    hyg_gaussian_sigma: float = 0.5
+    hyg_min_area: int = 20
+    hyg_split_min_distance: int = 5
     
     # Watershed splitting parameters
     split_fused_colonies: bool = True
@@ -402,7 +403,8 @@ def analyze_replica_plating(
     tetrad_path: str | Path,
     hyg_path: str | Path,
     config: AnalysisConfig = None,
-    threshold_dist: float = None
+    threshold_dist: float = None,
+    pic_result_path: str = None
 ) -> tuple[int, int]:
     """
     Analyze replica plating results with robust image alignment.
@@ -557,8 +559,8 @@ def analyze_replica_plating(
     ax[2].axis('off')
     
     plt.tight_layout()
-    plt.savefig(config.output_filename, dpi=config.output_dpi, bbox_inches='tight')
-    print(f"结果已保存至: {config.output_filename}")
+    plt.savefig(pic_result_path, dpi=config.output_dpi, bbox_inches='tight')
+    print(f"结果已保存至: {pic_result_path}")
     
     plt.show()
     plt.close()
@@ -583,8 +585,11 @@ if __name__ == "__main__":
     import os
     
     # Example paths - modify these for your analysis
-    tetrad_path = "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/17th_round/3d/302_meu23_3d_#2_202511.cropped.png"
-    hyg_path = "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/17th_round/replica/302_meu23_HYG_#2_202511.cropped.png"
+    # data_folder = "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
+    # tetrad_path = f"{data_folder}/17th_round/6d/303_omh3_6d_#2_202511.cropped.png"
+    # hyg_path = f"{data_folder}/17th_round/replica/303_omh3_HYG_#2_202511.cropped.png"
+
+    data = pd.read_excel("./results/all_rounds_combined_verification_summary.xlsx")
     
     # Configuration
     config = AnalysisConfig(
@@ -594,15 +599,24 @@ if __name__ == "__main__":
         split_fused_colonies=True
     )
     
-    if os.path.exists(tetrad_path) and os.path.exists(hyg_path):
-        print("=" * 60)
-        print("四分体解剖 HYG 筛选分析 (带图像对齐)")
-        print("=" * 60)
-        
-        del_count, wt_count = analyze_replica_plating(
-            tetrad_path, hyg_path, config=config
-        )
-    else:
-        print("请检查文件路径是否正确。")
-        print(f"Tetrad: {tetrad_path}")
-        print(f"HYG: {hyg_path}")
+    for idx, row in data.iterrows():
+        try:
+            tetrad_path = Path(row['6d_image_path'])
+            hyg_path = Path(row['HYG_image_path'])
+        except Exception as e:
+            print("路径读取错误:", e)
+            continue
+        print(f"\n处理样本: {tetrad_path.stem} 和 {hyg_path.stem}")
+        if os.path.exists(tetrad_path) and os.path.exists(hyg_path):
+            print("=" * 60)
+            print("四分体解剖 HYG 筛选分析 (带图像对齐)")
+            print("=" * 60)
+            
+            del_count, wt_count = analyze_replica_plating(
+                tetrad_path, hyg_path, config=config, 
+                pic_result_path=f"./results/selection_marker_test/{tetrad_path.stem}_result.png"
+            )
+        else:
+            print("请检查文件路径是否正确。")
+            print(f"Tetrad: {tetrad_path}")
+            print(f"HYG: {hyg_path}")
