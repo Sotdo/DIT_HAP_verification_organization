@@ -751,19 +751,27 @@ def genotype_by_snr(
     """
     Determine genotypes based on SNR.
     
+    For Essential Genes:
+    - High SNR (signal present) = WT (survives)
+    - Low SNR (no signal) = DEL (lethal, no growth)
+    
     Args:
         snr: SNR array.
-        threshold: SNR threshold for DEL classification.
+        threshold: SNR threshold for WT classification.
         
     Returns:
         Genotype array with 'DEL' or 'WT' strings.
     """
-    return np.where(snr > threshold, 'DEL', 'WT')
+    return np.where(snr > threshold, 'WT', 'DEL')
 
 
 def genotype_by_otsu(signals: np.ndarray) -> tuple[np.ndarray, float]:
     """
     Determine genotypes using Otsu thresholding.
+    
+    For Essential Genes:
+    - High signal = WT (survives)
+    - Low signal = DEL (lethal)
     
     Args:
         signals: Signal array.
@@ -772,7 +780,7 @@ def genotype_by_otsu(signals: np.ndarray) -> tuple[np.ndarray, float]:
         Tuple of (genotype array, threshold value).
     """
     threshold = threshold_otsu(signals.flatten())
-    genotypes = np.where(signals > threshold, 'DEL', 'WT')
+    genotypes = np.where(signals > threshold, 'WT', 'DEL')
     return genotypes, threshold
 
 
