@@ -5,7 +5,7 @@ from loguru import logger
 
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Rectangle #,Circle
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -13,24 +13,35 @@ import seaborn as sns
 import cv2
 
 # scikit-image - Image processing toolkit
-from skimage import io, filters, measure, morphology
+from skimage import io, measure, morphology #,filters
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
 from skimage.filters import gaussian, threshold_otsu
 
 # scipy - Distance calculation and optimization
-from scipy.spatial import distance
+# from scipy.spatial import distance
 from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment, minimize
+from scipy.optimize import linear_sum_assignment
 from scipy import ndimage
 
 # Set Matplotlib global font to Arial
 # If Arial is not available, it will fallback to DejaVu Sans
 plt.rcParams.update({
-    'axes.unicode_minus': False,  # Correctly display minus sign
-    'figure.dpi': 100,            # Image resolution
-    'axes.titlesize': 12,         # Title font size
-    'axes.labelsize': 10,         # Axis label font size
+    'axes.unicode_minus': True,  # Correctly display minus sign
+    'figure.dpi': 300,            # Image resolution
+    'axes.titlesize': 20,         # Title font size
+    'axes.titleweight': 'bold', # Title font weight
+    'axes.labelsize': 18,         # Axis label font size
+    'axes.labelweight': 'bold',  # Axis label font weight
+    'font.family': 'Arial',       # Set global font to Arial
+    'font.size': 16,              # Base font size
+    'legend.fontsize': 16,        # Legend font size
+    'axes.spines.top': False,      # Remove top spine
+    'axes.spines.right': False,     # Remove right spine
+    'axes.linewidth': 3,   # Axis line width
+    'lines.linewidth': 3,  # Line width
+    'lines.solid_joinstyle': 'round',  # Line join style
+    'lines.solid_capstyle': 'round'    # Line cap style
 })
 
 # %% ============================ Constants ==============================
@@ -89,9 +100,6 @@ class Configuration:
 
     # signal detection radius
     signal_detection_radius: int = 15
-
-    # Output parameters
-    output_dpi: int = 300
 
 # %% =========================== Functions =============================
 @logger.catch
@@ -353,7 +361,7 @@ def grid_fitting_and_optimization(
     colony_regions: pd.DataFrame,
     expected_rows: int = 4,
     expected_cols: int = 12
-) -> tuple[np.ndarray, pd.DataFrame, np.ndarray, float, int, int, np.ndarray, float]:
+) -> tuple[pd.DataFrame, np.ndarray, float, int, int, tuple[float, float]]:
     """Fit and optimize a colony grid to detected centroids."""
     fitted_grid, colony_regions = colony_grid_fitting(
         colony_regions,
@@ -383,7 +391,7 @@ def grid_fitting_and_optimization(
 def colony_grid_table(
     image: np.ndarray,
     config: Configuration
-) -> pd.DataFrame:
+) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
     """Create a grid table of colonies."""
 
     # Binarize image
@@ -537,7 +545,7 @@ def plot_genotype_results(
     last_day = max(tetrad_results.keys())
     n_cols = n_days + 1 + 1 # +1 for marker plate, +1 for colony area plot
 
-    fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 6))
+    fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 4))
     for day_idx, (day, day_data) in enumerate(sorted(tetrad_results.items())):
         ax = axes[day_idx]
         ax.imshow(day_data["image"])
@@ -566,22 +574,32 @@ def plot_genotype_results(
     area_table["area_day0"] = 0
     area_table = area_table.rename_axis("day", axis=1).stack().reset_index().rename(columns={0: "area"})
     area_table["day_num"] = area_table["day"].str.extract(r'day(\d+)').astype(int)
-    last_day_WT_colonies_area_median = area_table.query("genotype == 'WT' and day_num == @last_day")["area"].median()
-    area_table["area[normalized]"] = area_table["area"] / last_day_WT_colonies_area_median
-    sns.lineplot(x="day_num", y="area[normalized]", hue="genotype", data=area_table, ax=ax_area, palette={"WT": "green", "Deletion": "red"})
+    last_day_WT_colonies_area_mean = area_table.query("genotype == 'WT' and day_num == @last_day")["area"].mean()
+    area_table["area[normalized]"] = area_table["area"] / last_day_WT_colonies_area_mean
+    sns.lineplot(x="day_num", y="area[normalized]", hue="genotype", data=area_table, ax=ax_area, palette={"WT": "green", "Deletion": "red"}, errorbar="se")
+    ax_area.axhline(1, color='gray', linestyle='--')
 
     plt.tight_layout()
-    plt.show()
-    plt.close()
+
+    return fig
 
 
 # %% ============================ Main Code ================================
 @logger.catch
-def process_pipeline():
-    config = Configuration()
+def genotyping_pipeline(
+    tetrad_image_paths: dict[int, Path],
+    marker_image_path: Path,
+    config: Configuration | None = None
+) -> tuple[pd.DataFrame, plt.Figure]:
+    config = Configuration(
+        tetrad_image_paths=tetrad_image_paths,
+        marker_image_path=marker_image_path
+    )
 
     last_day = max(config.tetrad_image_paths.keys())
     day_colonies = {}
+    last_day_binary = None
+    last_day_colony_regions = None
     for day, day_image_path in config.tetrad_image_paths.items():
         day_colonies[day] = {}
         image = io.imread(day_image_path)
@@ -590,11 +608,14 @@ def process_pipeline():
             image,
             config
         )
-        if day == last_day:
+        if day == last_day and last_day_binary is None and last_day_colony_regions is None:
             last_day_binary = day_colonies[day]["binary_image"]
             last_day_colony_regions = day_colonies[day]["table"]
         day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
     
+    if last_day_binary is None or last_day_colony_regions is None:
+        raise ValueError("No tetrad images were processed.")
+
     marker_plate_image = io.imread(config.marker_image_path)
     marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
         last_day_colony_regions,
@@ -606,9 +627,26 @@ def process_pipeline():
     marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
     genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
 
-    final_result = pd.concat(
+    all_colony_regions = pd.concat(
         [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity"]]],
         axis=1
     )
-    plot_genotype_results(day_colonies, marker_aligned, final_result, radius=config.signal_detection_radius)
+    fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+    return all_colony_regions, fig
+# %%
+
+if __name__ == "__main__":
+    all_colony_regions, fig = genotyping_pipeline(
+        tetrad_image_paths={
+            3: V_GENE_3D_TETRAD_IMG,
+            4: V_GENE_4D_TETRAD_IMG,
+            5: V_GENE_5D_TETRAD_IMG,
+            6: V_GENE_6D_TETRAD_IMG
+        },
+        marker_image_path=V_GENE_HYG_IMG
+    )
+
+    plt.show()
+    plt.close()
+
 # %%
