@@ -5,3 +5,5 @@ pandas
 openpyxl
 opencv-python
 scikit-image
+matplotlib
+seaborn
