@@ -242,8 +242,8 @@ def detect_colonies(
         pass
     else:
         h, w = binary_image.shape
-        x_min, x_max = w * 0.05, w * 0.95
-        y_min, y_max = h * 0.05, h * 0.95
+        x_min, x_max = w * 0.02, w * 0.98
+        y_min, y_max = h * 0.02, h * 0.98
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {x_min} and centroid_x <= {x_max} and centroid_y >= {y_min} and centroid_y <= {y_max}"
         ).copy()
@@ -288,8 +288,9 @@ def colony_grid_fitting(
     x_spacing = np.mean(filtered_x_diffs)
     y_spacing = np.mean(filtered_y_diffs)
     # Use median of smallest values for robust min calculation
-    x_min = np.median(np.sort(centroids[:, 0])[:3])
-    y_min = np.median(np.sort(centroids[:, 1])[:6])
+    # x_min = np.median(np.sort(centroids[:, 0])[:3])
+    x_min = centroids[:, 0].min()
+    y_min = np.median(np.sort(centroids[:, 1])[:5])
 
     fitted_grid = np.zeros((expected_rows, expected_cols, 2))
     for row in range(expected_rows):
