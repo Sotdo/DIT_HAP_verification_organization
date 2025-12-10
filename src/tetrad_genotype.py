@@ -301,8 +301,8 @@ def colony_grid_fitting(
     # colony to grid point assignment
     for idx, region in colony_regions.iterrows():
         centroid = np.array([region["centroid_x"], region["centroid_y"]])
-        col_idx = min(11, int(round((centroid[0] - x_min) / x_spacing))) if x_spacing > 0 else 0
-        row_idx = min(3, int(round((centroid[1] - y_min) / y_spacing))) if y_spacing > 0 else 0
+        col_idx = min(expected_cols-1, int(round((centroid[0] - x_min) / x_spacing))) if x_spacing > 0 else 0
+        row_idx = min(expected_rows-1, int(round((centroid[1] - y_min) / y_spacing))) if y_spacing > 0 else 0
         colony_regions.loc[idx, "row"] = row_idx
         colony_regions.loc[idx, "col"] = col_idx
         colony_regions.loc[idx, "grid_point_x"] = fitted_grid[row_idx, col_idx, 0]
@@ -316,12 +316,12 @@ def colony_grid_fitting(
     colony_regions["col"] = colony_regions["col"].astype(int)
 
     # keep the minimum distance colony for each row and each col
-    colony_regions = colony_regions.groupby(["row", "col"], as_index=False).apply(
+    dedup_colony_regions = colony_regions.groupby(["row", "col"], as_index=False).apply(
         lambda group: group.loc[group["distance"].idxmin()],
         include_groups=False
     ).reset_index(drop=True)
 
-    return fitted_grid, colony_regions
+    return fitted_grid, dedup_colony_regions
 
 @logger.catch
 def rotate_grid(
@@ -602,6 +602,13 @@ def genotyping(
     radius: int = 15
 ) -> pd.DataFrame:
     """Genotype colonies based on tetrad binary image."""
+    
+    # Calculate background as 15th percentile of non-colony regions
+    background_signal = np.percentile(aligned_marker_image_gray[aligned_marker_image_gray>0], 15)
+    # logger.info(f"Background signal estimated: {background_signal:.2f}")
+    
+    # Subtract background and clip negative values
+    aligned_marker_image_gray = np.clip(aligned_marker_image_gray.astype(float) - background_signal, 0, 255).astype(np.uint8)
 
     for idx, region in colony_regions.iterrows():
         cx, cy = int(region["grid_point_x"]), int(region["grid_point_y"])
@@ -621,7 +628,7 @@ def genotyping(
         otsu_threshold = threshold_otsu(aligned_marker_image_gray)
         positive_signal_median = np.median(aligned_marker_image_gray[aligned_marker_image_gray > otsu_threshold])
 
-        marker_intensity_threshold = max(100, otsu_threshold)
+        marker_intensity_threshold = max(50, otsu_threshold)
         logger.debug(f"Using marker intensity threshold: {marker_intensity_threshold}")
         colony_regions.loc[idx, "tetrad_intensity"] = mean_tetrad_intensity
         colony_regions.loc[idx, "marker_intensity"] = mean_marker_intensity
@@ -646,7 +653,7 @@ def plot_genotype_results(
     """Plot genotyping results with colony annotations."""
     n_days = len(tetrad_results)
     last_day = max(tetrad_results.keys())
-    n_cols = n_days + 1 + 1 # +1 for marker plate, +1 for colony area plot
+    n_cols = n_days + 1 + 2 + 1 # +1 for marker plate, +1 for colony area plot
 
     fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 4))
     for day_idx, (day, day_data) in enumerate(sorted(tetrad_results.items())):
@@ -670,16 +677,36 @@ def plot_genotype_results(
             square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
             ax.add_patch(square)
 
-    axes[-2].imshow(aligned_marker_image, rasterized=True)
-    axes[-2].set_title("Aligned Marker Plate")
-    axes[-2].axis('off')
+    axes[-4].imshow(aligned_marker_image, rasterized=True)
+    axes[-4].set_title("Aligned Marker Plate")
+    axes[-4].axis('off')
     for idx, region in colony_regions.iterrows():
         cx, cy = region[f"grid_point_x_day{last_day}"], region[f"grid_point_y_day{last_day}"]
         genotype = region["genotype"]
         color = 'green' if genotype == "WT" else 'red'
         square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
-        axes[-2].add_patch(square)
-    
+        axes[-4].add_patch(square)
+
+    # remove background for better visualization
+    aligned_marker_image_gray = convert_to_grayscale(aligned_marker_image, channel=0)
+    background_signal = np.percentile(aligned_marker_image_gray[aligned_marker_image_gray>0], 15)
+    aligned_marker_image_gray2 = np.clip(aligned_marker_image_gray.astype(float) - background_signal, 0, 255).astype(np.uint8)
+    axes[-3].imshow(aligned_marker_image_gray2, cmap='gray', rasterized=True)
+    axes[-3].set_title("Background Subtracted Marker Plate")
+    axes[-3].axis('off')
+
+    pixel_bins = np.arange(0, 256, 1)
+    axes[-2].hist(aligned_marker_image_gray.ravel(), bins=pixel_bins, color='blue', alpha=0.7)
+    axes[-2].hist(aligned_marker_image_gray2.ravel(), bins=pixel_bins, color='red', alpha=0.7)
+    otsu_thresh = threshold_otsu(aligned_marker_image_gray)
+    otsu_thresh2 = threshold_otsu(aligned_marker_image_gray2)
+    axes[-2].axvline(otsu_thresh, color='darkblue', linestyle='--', label='Otsu Threshold')
+    axes[-2].axvline(otsu_thresh2, color='darkred', linestyle='--', label='Otsu Threshold (BG Subtracted)')
+    axes[-2].set_title("Marker Plate Intensity Histogram")
+    axes[-2].set_xlabel("Intensity")
+    axes[-2].set_ylabel("Frequency")
+    axes[-2].set_xlim(0, 255)
+
 
     # Colony area plot
     ax_area = axes[-1]
@@ -814,12 +841,12 @@ if __name__ == "__main__":
 # %% =========================== Manual Run ================================
 
 tetrad_image_paths={
-    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/3d/66_isu1_3d_#1_202412.cropped.png"),
-    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/4d/66_isu1_4d_#1_202412.cropped.png"),
-    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/5d/66_isu1_5d_#1_202412.cropped.png"),
-    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/6d/66_isu1_6d_#1_202412.cropped.png")
+    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/3d/76_bud22_3d_#2_202411.cropped.png"),
+    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/4d/76_bud22_4d_#2_202411.cropped.png"),
+    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/5d/76_bud22_5d_#2_202411.cropped.png"),
+    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/6d/76_bud22_6d_#2_202411.cropped.png")
 }
-marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/replica/66_isu1_HYG_#1_202412.cropped.png")
+marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/replica/76_bud22_HYG_#2_202411.cropped.png")
 
 config = Configuration(
     tetrad_image_paths=tetrad_image_paths,
