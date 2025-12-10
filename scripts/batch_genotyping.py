@@ -1,0 +1,118 @@
+# %% ============================= Imports =============================
+import sys
+from pathlib import Path
+from loguru import logger
+from tqdm import tqdm
+
+import pandas as pd
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
+from tetrad_genotype import genotyping_pipeline
+
+# %% ============================= Parameters =============================
+DAY_IMAGE_COLUMNS = {
+    3: "3d_image_path",
+    4: "4d_image_path",
+    5: "5d_image_path",
+    6: "6d_image_path"
+}
+
+MARKER_IMAGE_COLUMN = "HYG_image_path"
+
+# %% ============================= Logging Setup =============================
+logger.remove()
+logger.add(
+    sys.stdout,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+           "<level>{level: <8}</level> | "
+           "<cyan>{module: <20}</cyan>:<cyan>{line: <4}</cyan> - | "
+           "<level>{message}</level>",
+    level="INFO"
+)
+
+logger.add(
+    "../logs/batch_genotyping.log",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {module: <20}:{line: <4} - | {message}",
+    level="DEBUG",
+    mode="w"
+)
+
+# %% ============================= Main =============================
+all_images_df = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
+
+genotyping_failed = []
+all_colony_regions = {}
+n = 0
+with PdfPages("../results/batch_genotyping_results.pdf") as pdf:
+    for idx, row in tqdm(all_images_df.iterrows(), total=len(all_images_df), desc="Batch Genotyping"):
+        round = row["round"]
+        gene_num = row["gene_num"]
+        gene_name = row["gene_name"]
+        gene_essentiality = row["gene_essentiality"]
+        phenotype_category = row["phenotype_categories"]
+        phenotype_description = row["phenotype_descriptions"]
+        colony_id = row["colony_id"]
+        date = row["date"]
+        image_info = (round, gene_num, gene_name, colony_id, date)
+
+        tetrad_image_paths = {}
+        for day, col in DAY_IMAGE_COLUMNS.items():
+            img_path = row[col]
+            if pd.notna(img_path):
+                tetrad_image_paths[day] = Path(img_path)
+        
+        marker_image_path = row[MARKER_IMAGE_COLUMN]
+
+        if pd.isna(marker_image_path) or not Path(marker_image_path).exists():
+            logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Skipping genotyping.")
+            genotyping_failed.append((*image_info, "Marker image not found"))
+            continue
+        else:
+            marker_image_path = Path(marker_image_path)
+            colony_regions, fig = genotyping_pipeline(
+                tetrad_image_paths=tetrad_image_paths,
+                marker_image_path=marker_image_path,
+                image_info=image_info,
+            )
+            fig.suptitle(
+                f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
+                f"Colony {colony_id} | Date {date}\n"
+                f"Phenotype: {phenotype_category} - {phenotype_description}",
+                fontsize=24, y=1.2, fontweight='bold'
+            )
+
+            pdf.savefig(fig, bbox_inches='tight')
+            plt.close(fig)
+            all_colony_regions[image_info] = colony_regions
+
+        n += 1
+        # if n > 50:
+        #     break    
+# %%
+concated_genotyping_results = pd.concat(all_colony_regions).rename_axis(
+    index=["round", "gene_num", "gene_name", "colony_id", "date", "row", "col"]
+).reset_index()
+concated_genotyping_results.to_excel("../results/batch_genotyping_results.xlsx", index=False)
+
+# %%
+# tmp = pd.read_excel("../results/batch_genotyping_results.xlsx")
+# space_statistics = tmp.groupby(["gene_name", "colony_id", "date"]).apply(
+#     lambda df: 
+#     pd.Series(
+#         {
+#             "x_spacing": (df["grid_point_x_day3"].max() - df["grid_point_x_day3"].min()) / 12,
+#             "y_spacing": (df["grid_point_y_day3"].max() - df["grid_point_y_day3"].min()) / 4
+#         }
+#     )
+# )
+# %%
+all_res = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
+# %%
+not_tetrated = []
+for i in range(48, 351,1):
+    if i not in all_res["gene_num"].values:
+        not_tetrated.append(i)
+# %%
