@@ -28,8 +28,17 @@ from loguru import logger
 
 import cv2
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from utils import roundConfig
+
+from skimage import io, measure, morphology #,filters
+from skimage.segmentation import watershed
+from skimage.feature import peak_local_max
+from skimage.filters import gaussian, threshold_otsu
+from scipy import ndimage
+
+import matplotlib.pyplot as plt
 
 # %% ------------------------------------ Constants ------------------------------------ #
 REPLICA_PLATES_ORDER = {
@@ -238,6 +247,75 @@ def find_tetrad_centroid(
 
     return centroid_x, centroid_y, viz_image
 
+def watershed_segmentation(
+    binary_image: np.ndarray,
+    min_distance: int = 20
+) -> np.ndarray:
+    """Apply watershed segmentation to separate touching colonies."""
+    # Compute distance transform
+    distance = ndimage.distance_transform_edt(binary_image)
+    
+    # Find local maxima (colony centers)
+    local_max = peak_local_max(
+        distance,
+        min_distance=min_distance,
+        labels=binary_image,
+        exclude_border=False
+    )
+    
+    # Create markers for watershed
+    markers = np.zeros_like(binary_image, dtype=int)
+    markers[tuple(local_max.T)] = np.arange(1, len(local_max) + 1)
+    
+    # Apply watershed
+    labels = watershed(-distance, markers, mask=binary_image)
+    
+    return labels
+
+def find_tetrad_centroid_sklearn_image(
+    plate: np.ndarray,
+    plate_config: ImageProcessingConfig,
+    viz_image: np.ndarray | None = None
+) -> tuple[int, int, np.ndarray | None]:
+    """Find colony centroids in a plate image using skimage."""
+    gray = np.mean(plate, axis=2).astype(plate.dtype)
+    h, w = gray.shape[:2]
+    # Crop to specified height and width ranges
+    start_h, end_h = int(h * plate_config.height_range[0] / 100), int(h * plate_config.height_range[1] / 100)
+    start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
+    gray = gray[start_h:end_h, start_w:end_w]
+    blur = gaussian(gray, sigma=1, preserve_range=True).astype(gray.dtype)
+    thresh_val = threshold_otsu(blur)
+    binary = blur > thresh_val
+    morph_binary = morphology.binary_opening(binary, morphology.disk(3))
+    watershed_labels = watershed_segmentation(morph_binary, min_distance=10)
+    region_properties_table = pd.DataFrame(measure.regionprops_table(watershed_labels, properties=("label","area", "centroid", "eccentricity")))
+    filtered_regions = region_properties_table.query("area >= 10 and area <= 7000").copy()
+
+    # centroid calculation, note the order of centroid-1 and centroid-0 for x and y
+    filtered_regions.rename(
+        columns={
+            "centroid-1": "centroid_x",
+            "centroid-0": "centroid_y"
+        },
+        inplace=True
+    )
+
+    centroid_x = int(filtered_regions["centroid_x"].mean()) if not filtered_regions.empty else gray.shape[1] // 2
+    centroid_y = int(filtered_regions["centroid_y"].mean()) if not filtered_regions.empty else gray.shape[0] // 2
+    
+    viz_image = None
+    centroid_x += start_w
+    centroid_y += start_h
+    if plate_config.visualize_colonies:
+        viz_image = (morph_binary * 255).astype(np.uint8)
+        for _, row in filtered_regions.iterrows():
+            cx, cy = int(row["centroid_x"]) + start_w, int(row["centroid_y"]) + start_h
+            cv2.circle(viz_image, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.circle(viz_image, (centroid_x, centroid_y), 10, (255, 0, 0), -1)
+    return centroid_x, centroid_y, viz_image
+
+
 @logger.catch
 def process_plates(
     plate_images: list[np.ndarray],
@@ -253,6 +331,7 @@ def process_plates(
     processed_plates = []
     for plate_image in plate_images:
         centroid_x, centroid_y, viz_image = find_tetrad_centroid(plate_image, plate_config=plate_config)
+        # centroid_x, centroid_y, viz_image = find_tetrad_centroid_sklearn_image(plate_image, plate_config=plate_config)
         processed_plates.append({
             'plate_image': plate_image,
             'centroid': (centroid_x, centroid_y),
@@ -398,3 +477,5 @@ def process_tetrad_images(
                 for f_img in failed_images:
                     logger.error(f" - {f_img}")
                 logger.error("*-" * 70)
+
+# %%
