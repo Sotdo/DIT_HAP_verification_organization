@@ -173,7 +173,8 @@ def find_tetrad_centroid(
     viz_image: np.ndarray | None = None
 ) -> tuple[int, int, np.ndarray | None]:
     """Find colony centroids in a plate image using OpenCV."""
-    gray = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY) if len(plate.shape) == 3 else plate
+    # only use red channel for grayscale conversion
+    gray = plate[:, :, 2] if len(plate.shape) == 3 else plate
     h, w = gray.shape[:2]
 
     # Crop to specified height and width ranges
@@ -185,10 +186,9 @@ def find_tetrad_centroid(
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
     # remove the background signal by reducing the 10th percentile of the positive signal
-    p10 = np.percentile(gray[gray > 0], 15)
+    p10 = np.percentile(gray[gray > 0], 30)
     gray = cv2.subtract(gray, np.full_like(gray, p10))
     gray = np.clip(gray, 0, 255).astype(np.uint8)
-    
     
     # Enhance contrast
     if gray is None:
@@ -201,20 +201,21 @@ def find_tetrad_centroid(
     enhanced = clahe.apply(contrast)
 
     # Adaptive thresholding
-    if plate_config.adaptive_block_size < 3:
-        plate_config.adaptive_block_size = 3
-    if plate_config.adaptive_block_size % 2 == 0:
-        plate_config.adaptive_block_size += 1
+    # if plate_config.adaptive_block_size < 3:
+    #     plate_config.adaptive_block_size = 3
+    # if plate_config.adaptive_block_size % 2 == 0:
+    #     plate_config.adaptive_block_size += 1
 
-    thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                  cv2.THRESH_BINARY, plate_config.adaptive_block_size, -plate_config.adaptive_thresh_c)
-
+    # thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+    #                               cv2.THRESH_BINARY, plate_config.adaptive_block_size, -plate_config.adaptive_thresh_c)
+    # Apply Otsu's thresholding
+    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     # Morphological operations
     kernel = np.ones((3, 3), np.uint8)
     # opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-    dilated = cv2.morphologyEx(closed, cv2.MORPH_DILATE, kernel, iterations=1)
-    eroded = cv2.morphologyEx(dilated, cv2.MORPH_ERODE, kernel, iterations=1)
+    # closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    dilated = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel, iterations=2)
+    eroded = cv2.morphologyEx(dilated, cv2.MORPH_ERODE, kernel, iterations=2)
     # Apply watershed segmentation to separate touching colonies
     # Distance transform
     dist_transform = cv2.distanceTransform(eroded, cv2.DIST_L2, 5)
@@ -279,8 +280,17 @@ def find_tetrad_centroid(
         # Fallback to original centroids if all were filtered out
         x_coords = sorted([p[0] for p in colony_centroids])
         y_coords = sorted([p[1] for p in colony_centroids])
-        centroid_x = int(np.mean(x_coords[2:-2]))  # exclude extreme points
-        centroid_y = int(np.mean(y_coords[2:-2]))  # exclude extreme points
+        if len(colony_centroids) > 12:
+            centroid_x = int(np.mean(x_coords[2:-2]))  # exclude extreme points
+            centroid_y = int(np.mean(y_coords[2:-2]))  # exclude extreme points
+        elif len(colony_centroids) > 6:
+            logger.warning("Few colonies detected, excluding extreme points for centroid calculation.")
+            centroid_x = int(np.mean(x_coords[1:-1]))  # exclude extreme points
+            centroid_y = int(np.mean(y_coords[1:-1]))  # exclude extreme points
+        else:
+            logger.warning("Very few colonies detected, using all points for centroid calculation.")
+            centroid_x = int(np.mean(x_coords))
+            centroid_y = int(np.mean(y_coords))
     else:
         centroid_x, centroid_y = gray.shape[1] // 2, gray.shape[0] // 2
 
@@ -326,8 +336,9 @@ def process_plates(
         for p in processed_plates:
             dist = np.linalg.norm(np.array(p['centroid']) - avg_centroid)
             if dist > plate_config.max_centroid_deviation_px:
-                logger.info(f"Adjusting centroid from {p['centroid']} to {tuple(avg_centroid.astype(int))} (deviation: {dist:.1f}px)")
-                p['final_centroid'] = tuple(avg_centroid.astype(int))
+                new_centroid = (np.array(p['centroid']) + avg_centroid) / 2
+                logger.info(f"Adjusting centroid from {p['centroid']} to {tuple(new_centroid.astype(int))} (deviation: {dist:.1f}px)")
+                p['final_centroid'] = tuple(new_centroid.astype(int))
             else:
                 p['final_centroid'] = p['centroid']
 
@@ -458,4 +469,148 @@ def process_tetrad_images(
                     logger.error(f" - {f_img}")
                 logger.error("*-" * 70)
 
+# %% ================================== Test Code ================================== #
+# # TETRAD_IMAGE = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion/1st_round/3d/1_rpl14_3d_#4_202411.tif")
+# # TETRAD_IMAGE = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion/1st_round/4d/1_rpl14_4d_#4_202411.tif")
+# # TETRAD_IMAGE = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion/1st_round/5d/1_rpl14_5d_#4_202411.tif")
+# TETRAD_IMAGE = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion/1st_round/6d/1_rpl14_6d_#4_202411.tif")
+# # TETRAD_IMAGE = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion/11th_round/replica/139_mus81_YHZAY2A_#2_202411.tif")
+# plate_config = ImageProcessingConfig()
+# target_radius = get_plate_crop_radius([TETRAD_IMAGE])
+# plates = crop_to_circle(TETRAD_IMAGE, target_radius)
+# plate = plates[0]
+# %%
+# gray = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY) if len(plate.shape) == 3 else plate
+# # Use only red channel for grayscale conversion
+# if len(plate.shape) == 3:
+#     gray = plate[:, :, 2]
+# h, w = gray.shape[:2]
+
+# # Crop to specified height and width ranges
+# start_h, end_h = int(h * plate_config.height_range[0] / 100), int(h * plate_config.height_range[1] / 100)
+# start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
+# gray = gray[start_h:end_h, start_w:end_w]
+# # remove noise with Gaussian blur
+# gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+# # %%
+# # remove the background signal by reducing the 10th percentile of the positive signal
+# p10 = np.percentile(gray[gray > 0], 25)
+# gray = cv2.subtract(gray, np.full_like(gray, p10))
+# gray = np.clip(gray, 0, 255).astype(np.uint8)
+# # %%
+# # Enhance contrast
+# if gray is None:
+#     raise ValueError("Input plate_image is invalid or could not be converted to grayscale.")
+# normalized = cv2.normalize(gray, dst=np.zeros_like(gray), alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+# contrast = cv2.convertScaleAbs(normalized, alpha=plate_config.contrast_alpha, beta=0)
+# # %%
+# # CLAHE for better contrast
+# clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+# enhanced = clahe.apply(contrast)
+# # %%
+# # Adaptive thresholding
+# if plate_config.adaptive_block_size < 3:
+#     plate_config.adaptive_block_size = 3
+# if plate_config.adaptive_block_size % 2 == 0:
+#     plate_config.adaptive_block_size += 1
+
+# # thresh = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+# #                                 cv2.THRESH_BINARY, plate_config.adaptive_block_size, -plate_config.adaptive_thresh_c)
+# # Apply Otsu's thresholding
+# _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+# # Morphological operations
+# kernel = np.ones((3, 3), np.uint8)
+# # opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+# # closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+# # eroded = cv2.morphologyEx(dilated, cv2.MORPH_ERODE, kernel, iterations=1)
+# dilated = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel, iterations=2)
+# # %%
+# # Apply watershed segmentation to separate touching colonies
+# # Distance transform
+# dist_transform = cv2.distanceTransform(eroded, cv2.DIST_L2, 5)
+
+# # Find local maxima as markers
+# _, sure_fg = cv2.threshold(dist_transform, 0.3 * dist_transform.max(), 255, 0)
+# sure_fg = np.uint8(sure_fg)
+
+# # Find unknown region
+# kernel_dilate = np.ones((3, 3), np.uint8)
+# sure_bg = cv2.dilate(eroded, kernel_dilate, iterations=3)
+# unknown = cv2.subtract(sure_bg, sure_fg)
+
+# # Label markers
+# _, markers = cv2.connectedComponents(sure_fg)
+# markers = markers + 1  # Add 1 to all labels so background is not 0 but 1
+# markers[unknown == 255] = 0  # Mark unknown region as 0
+
+# # Apply watershed
+# plate_bgr = cv2.cvtColor(eroded, cv2.COLOR_GRAY2BGR)
+# markers = cv2.watershed(plate_bgr, markers)
+
+# # Convert watershed labels back to contours
+# contours = []
+# colony_centroids = []
+
+# for region_label in np.unique(markers):
+#     if region_label <= 1:  # Skip background (1) and boundaries (-1)
+#         continue
+    
+#     # Create binary mask for this region
+#     region_mask = (markers == region_label).astype(np.uint8) * 255
+    
+#     # Find contours for this region
+#     region_contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#     contours.extend(region_contours)
+
+# viz_image = None
+
+# if plate_config.visualize_colonies:
+#     viz_image = cv2.cvtColor(eroded, cv2.COLOR_GRAY2BGR)
+
+# for contour in contours:
+#     area = cv2.contourArea(contour)
+#     perimeter = cv2.arcLength(contour, True)
+#     if perimeter == 0:
+#         continue
+
+#     circularity = (4 * np.pi * area) / (perimeter * perimeter)
+#     if area > plate_config.min_colony_size and circularity > plate_config.circularity_threshold:
+#         M = cv2.moments(contour)
+#         if M["m00"] != 0:
+#             cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+#             colony_centroids.append((cx, cy))
+
+#             if viz_image is not None:
+#                 cv2.drawContours(viz_image, [contour], -1, (0, 255, 0), 2)
+#                 cv2.circle(viz_image, (cx, cy), 5, (0, 0, 255), -1)
+
+# # Calculate centroid
+# if colony_centroids:
+#     # Fallback to original centroids if all were filtered out
+#     x_coords = sorted([p[0] for p in colony_centroids])
+#     y_coords = sorted([p[1] for p in colony_centroids])
+#     if len(colony_centroids) > 12:
+#         centroid_x = int(np.mean(x_coords[2:-2]))  # exclude extreme points
+#         centroid_y = int(np.mean(y_coords[2:-2]))  # exclude extreme points
+#     elif len(colony_centroids) > 6:
+#         logger.warning("Few colonies detected, excluding extreme points for centroid calculation.")
+#         centroid_x = int(np.mean(x_coords[1:-1]))  # exclude extreme points
+#         centroid_y = int(np.mean(y_coords[1:-1]))  # exclude extreme points
+#     else:
+#         logger.warning("Very few colonies detected, using all points for centroid calculation.")
+#         centroid_x = int(np.mean(x_coords))
+#         centroid_y = int(np.mean(y_coords))
+# else:
+#     centroid_x, centroid_y = gray.shape[1] // 2, gray.shape[0] // 2
+
+# if viz_image is not None:
+#     cv2.circle(viz_image, (centroid_x, centroid_y), 10, (255, 0, 0), -1)
+# else:
+#     viz_image = None
+
+# # transform centroid back to original plate coordinates
+# centroid_x += start_w
+# centroid_y += start_h
 # %%
