@@ -57,14 +57,14 @@ class ImageProcessingConfig:
     """Configuration for image processing."""
     # Tetrad parameters
     target_radius: int = 490  # plate radius in pixels
-    height_range: tuple[int, int] = (45, 80)
-    width_range: tuple[int, int] = (10, 90)
+    height_range: tuple[int, int] = (45, 85)
+    width_range: tuple[int, int] = (5, 95)
     final_height_percent: int = 30
     final_width_percent: int = 75
     visualize_colonies: bool = True
     adaptive_thresh_c: int = 2
-    max_centroid_deviation_px: int | None = 75
-    min_colony_size: int = 50 # minimum colony size in pixels, 50 for tetrads, 100 for replicas
+    max_centroid_deviation_px: int | None = 100
+    min_colony_size: int = 75 # minimum colony size in pixels, 50 for tetrads, 100 for replicas
     circularity_threshold: float = 0.7 # circularity threshold for colony detection, 0.7 for tetrads, 0.5 for replicas
     adaptive_block_size: int = 30 # must be odd number, 30 for tetrads, 120 for replicas
     contrast_alpha: float = 1.0 # contrast adjustment factor, 1.0 for tetrads, 1.5 for replicas
@@ -181,6 +181,15 @@ def find_tetrad_centroid(
     start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
     gray = gray[start_h:end_h, start_w:end_w]
 
+    # remove noise with Gaussian blur
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # remove the background signal by reducing the 10th percentile of the positive signal
+    p10 = np.percentile(gray[gray > 0], 15)
+    gray = cv2.subtract(gray, np.full_like(gray, p10))
+    gray = np.clip(gray, 0, 255).astype(np.uint8)
+    
+    
     # Enhance contrast
     if gray is None:
         raise ValueError("Input plate_image is invalid or could not be converted to grayscale.")
@@ -202,15 +211,51 @@ def find_tetrad_centroid(
 
     # Morphological operations
     kernel = np.ones((3, 3), np.uint8)
-    opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-    contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Find colonies
+    # opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    dilated = cv2.morphologyEx(closed, cv2.MORPH_DILATE, kernel, iterations=1)
+    eroded = cv2.morphologyEx(dilated, cv2.MORPH_ERODE, kernel, iterations=1)
+    # Apply watershed segmentation to separate touching colonies
+    # Distance transform
+    dist_transform = cv2.distanceTransform(eroded, cv2.DIST_L2, 5)
+    
+    # Find local maxima as markers
+    _, sure_fg = cv2.threshold(dist_transform, 0.3 * dist_transform.max(), 255, 0)
+    sure_fg = np.uint8(sure_fg)
+    
+    # Find unknown region
+    kernel_dilate = np.ones((3, 3), np.uint8)
+    sure_bg = cv2.dilate(eroded, kernel_dilate, iterations=3)
+    unknown = cv2.subtract(sure_bg, sure_fg)
+    
+    # Label markers
+    _, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1  # Add 1 to all labels so background is not 0 but 1
+    markers[unknown == 255] = 0  # Mark unknown region as 0
+    
+    # Apply watershed
+    plate_bgr = cv2.cvtColor(eroded, cv2.COLOR_GRAY2BGR)
+    markers = cv2.watershed(plate_bgr, markers)
+    
+    # Convert watershed labels back to contours
+    contours = []
     colony_centroids = []
+    
+    for region_label in np.unique(markers):
+        if region_label <= 1:  # Skip background (1) and boundaries (-1)
+            continue
+        
+        # Create binary mask for this region
+        region_mask = (markers == region_label).astype(np.uint8) * 255
+        
+        # Find contours for this region
+        region_contours, _ = cv2.findContours(region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours.extend(region_contours)
+    
     viz_image = None
 
     if plate_config.visualize_colonies:
-        viz_image = cv2.cvtColor(contrast, cv2.COLOR_GRAY2BGR)
+        viz_image = cv2.cvtColor(eroded, cv2.COLOR_GRAY2BGR)
 
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -231,8 +276,11 @@ def find_tetrad_centroid(
 
     # Calculate centroid
     if colony_centroids:
-        centroid_x = int(np.mean([p[0] for p in colony_centroids]))
-        centroid_y = int(np.mean([p[1] for p in colony_centroids]))
+        # Fallback to original centroids if all were filtered out
+        x_coords = sorted([p[0] for p in colony_centroids])
+        y_coords = sorted([p[1] for p in colony_centroids])
+        centroid_x = int(np.mean(x_coords[2:-2]))  # exclude extreme points
+        centroid_y = int(np.mean(y_coords[2:-2]))  # exclude extreme points
     else:
         centroid_x, centroid_y = gray.shape[1] // 2, gray.shape[0] // 2
 
@@ -245,74 +293,6 @@ def find_tetrad_centroid(
     centroid_x += start_w
     centroid_y += start_h
 
-    return centroid_x, centroid_y, viz_image
-
-def watershed_segmentation(
-    binary_image: np.ndarray,
-    min_distance: int = 20
-) -> np.ndarray:
-    """Apply watershed segmentation to separate touching colonies."""
-    # Compute distance transform
-    distance = ndimage.distance_transform_edt(binary_image)
-    
-    # Find local maxima (colony centers)
-    local_max = peak_local_max(
-        distance,
-        min_distance=min_distance,
-        labels=binary_image,
-        exclude_border=False
-    )
-    
-    # Create markers for watershed
-    markers = np.zeros_like(binary_image, dtype=int)
-    markers[tuple(local_max.T)] = np.arange(1, len(local_max) + 1)
-    
-    # Apply watershed
-    labels = watershed(-distance, markers, mask=binary_image)
-    
-    return labels
-
-def find_tetrad_centroid_sklearn_image(
-    plate: np.ndarray,
-    plate_config: ImageProcessingConfig,
-    viz_image: np.ndarray | None = None
-) -> tuple[int, int, np.ndarray | None]:
-    """Find colony centroids in a plate image using skimage."""
-    gray = np.mean(plate, axis=2).astype(plate.dtype)
-    h, w = gray.shape[:2]
-    # Crop to specified height and width ranges
-    start_h, end_h = int(h * plate_config.height_range[0] / 100), int(h * plate_config.height_range[1] / 100)
-    start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
-    gray = gray[start_h:end_h, start_w:end_w]
-    blur = gaussian(gray, sigma=1, preserve_range=True).astype(gray.dtype)
-    thresh_val = threshold_otsu(blur)
-    binary = blur > thresh_val
-    morph_binary = morphology.binary_opening(binary, morphology.disk(3))
-    watershed_labels = watershed_segmentation(morph_binary, min_distance=10)
-    region_properties_table = pd.DataFrame(measure.regionprops_table(watershed_labels, properties=("label","area", "centroid", "eccentricity")))
-    filtered_regions = region_properties_table.query("area >= 10 and area <= 7000").copy()
-
-    # centroid calculation, note the order of centroid-1 and centroid-0 for x and y
-    filtered_regions.rename(
-        columns={
-            "centroid-1": "centroid_x",
-            "centroid-0": "centroid_y"
-        },
-        inplace=True
-    )
-
-    centroid_x = int(filtered_regions["centroid_x"].mean()) if not filtered_regions.empty else gray.shape[1] // 2
-    centroid_y = int(filtered_regions["centroid_y"].mean()) if not filtered_regions.empty else gray.shape[0] // 2
-    
-    viz_image = None
-    centroid_x += start_w
-    centroid_y += start_h
-    if plate_config.visualize_colonies:
-        viz_image = (morph_binary * 255).astype(np.uint8)
-        for _, row in filtered_regions.iterrows():
-            cx, cy = int(row["centroid_x"]) + start_w, int(row["centroid_y"]) + start_h
-            cv2.circle(viz_image, (cx, cy), 5, (0, 0, 255), -1)
-        cv2.circle(viz_image, (centroid_x, centroid_y), 10, (255, 0, 0), -1)
     return centroid_x, centroid_y, viz_image
 
 
