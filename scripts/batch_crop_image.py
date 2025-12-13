@@ -34,8 +34,9 @@ class BatchConfig:
     )
     replica_config: ImageProcessingConfig = field(
         default_factory=lambda: ImageProcessingConfig(
-            min_colony_size=500,
-            circularity_threshold=0.45,
+            min_colony_size=350,
+            circularity_threshold=0.25,
+            solidity_threshold=0.85,
             adaptive_block_size=200,
             contrast_alpha=1.6
         )
