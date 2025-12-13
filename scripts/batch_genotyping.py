@@ -41,11 +41,15 @@ logger.add(
 )
 
 # %% ============================= Main =============================
+logger.info("Starting batch genotyping process...")
+
+logger.info("Loading all images dataframe...")
 all_images_df = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
 
 genotyping_failed = []
 all_colony_regions = {}
 n = 0
+logger.info("Beginning genotyping for each colony...")
 with PdfPages("../results/batch_genotyping_results.pdf") as pdf:
     for idx, row in tqdm(all_images_df.iterrows(), total=len(all_images_df), desc="Batch Genotyping"):
         round = row["round"]
@@ -71,26 +75,35 @@ with PdfPages("../results/batch_genotyping_results.pdf") as pdf:
             genotyping_failed.append((*image_info, "Marker image not found"))
             continue
         else:
-            marker_image_path = Path(marker_image_path)
-            colony_regions, fig = genotyping_pipeline(
-                tetrad_image_paths=tetrad_image_paths,
-                marker_image_path=marker_image_path,
-                image_info=image_info,
-            )
-            fig.suptitle(
-                f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
-                f"Colony {colony_id} | Date {date}\n"
-                f"Phenotype: {phenotype_category} - {phenotype_description}",
-                fontsize=24, y=1.2, fontweight='bold'
-            )
+            try:
+                marker_image_path = Path(marker_image_path)
+                colony_regions, fig = genotyping_pipeline(
+                    tetrad_image_paths=tetrad_image_paths,
+                    marker_image_path=marker_image_path,
+                    image_info=image_info,
+                )
+                fig.suptitle(
+                    f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
+                    f"Colony {colony_id} | Date {date}\n"
+                    f"Phenotype: {phenotype_category} - {phenotype_description}",
+                    fontsize=24, y=1.2, fontweight='bold'
+                )
 
-            pdf.savefig(fig, bbox_inches='tight')
-            plt.close(fig)
-            all_colony_regions[image_info] = colony_regions
+                pdf.savefig(fig, bbox_inches='tight', dpi=150)
+                plt.close(fig)
+                all_colony_regions[image_info] = colony_regions
+            except Exception as e:
+                logger.error(f"Genotyping failed for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Error: {e}")
+                genotyping_failed.append((*image_info, str(e)))
+                continue
 
         n += 1
         # if n > 50:
         #     break    
+logger.info("Batch genotyping process completed.")
+logger.error(f"Genotyping failed for {len(genotyping_failed)} colonies.")
+for fail_info in genotyping_failed:
+    logger.error(f"- Round {fail_info[0]}, Gene Num {fail_info[1]}, Gene Name {fail_info[2]}, Colony ID {fail_info[3]}, Date {fail_info[4]}. Reason: {fail_info[5]}")
 # %%
 concated_genotyping_results = pd.concat(all_colony_regions).rename_axis(
     index=["round", "gene_num", "gene_name", "colony_id", "date", "row", "col"]
@@ -109,10 +122,10 @@ concated_genotyping_results.to_excel("../results/batch_genotyping_results.xlsx",
 #     )
 # )
 # %%
-all_res = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
-# %%
-not_tetrated = []
-for i in range(48, 351,1):
-    if i not in all_res["gene_num"].values:
-        not_tetrated.append(i)
+# all_res = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
+# # %%
+# not_tetrated = []
+# for i in range(48, 351,1):
+#     if i not in all_res["gene_num"].values:
+#         not_tetrated.append(i)
 # %%
