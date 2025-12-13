@@ -155,7 +155,8 @@ def binarize_image(
     sigma: float = 1.0,
     threshold: int | None = None,
     disk_size: int = 3,
-    operation: str = "open"
+    operation: str = "open",
+    image_notes: tuple | None = None
 ) -> np.ndarray:
     """Binarize an image using Otsu's thresholding and morphological operations."""
     if channel is None:
@@ -177,7 +178,7 @@ def binarize_image(
     signal_pixels_ratio = np.sum(binary) / binary.size
     if (signal_pixels_ratio < 0.05 or signal_pixels_ratio > 0.9) and channel is not None:
         threshold = np.percentile(blurred, 85)
-        logger.warning(f"Unusual signal pixel ratio: {signal_pixels_ratio:.4f}. Using 85th percentile threshold: {threshold:.2f}")
+        logger.warning(f"**** {' '.join(map(str, image_notes)) if image_notes else ''}: Unusual signal pixel ratio: {signal_pixels_ratio:.4f}. Using 85th percentile threshold: {threshold:.2f}")
         binary = blurred > threshold
 
     # Apply morphological operations
@@ -285,6 +286,12 @@ def colony_grid_fitting(
     filtered_x_diffs = x_diff[(x_diff > 30) & (x_diff < 70)]
     filtered_y_diffs = y_diff[(y_diff > 30) & (y_diff < 70)]
 
+    if filtered_x_diffs.size == 0:
+        filtered_x_diffs = x_diff[(x_diff > 60) & (x_diff < 140)]
+        filtered_x_diffs = filtered_x_diffs / 2
+    if filtered_y_diffs.size == 0:
+        filtered_y_diffs = y_diff[(y_diff > 60) & (y_diff < 140)]
+        filtered_y_diffs = filtered_y_diffs / 2
     x_spacing = np.mean(filtered_x_diffs)
     y_spacing = np.mean(filtered_y_diffs)
     # Use median of smallest values for robust min calculation
@@ -508,7 +515,8 @@ def grid_fitting_and_optimization(
 @logger.catch
 def colony_grid_table(
     image: np.ndarray,
-    config: Configuration
+    config: Configuration,
+    image_notes: tuple | None = None
 ) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
     """Create a grid table of colonies."""
 
@@ -518,7 +526,8 @@ def colony_grid_table(
         gray_method=config.tetrad_gray_method,
         sigma=config.tetrad_gaussian_sigma,
         disk_size=config.morphology_disk_size,
-        operation=config.morphology_operation
+        operation=config.morphology_operation,
+        image_notes=image_notes
     )
 
     # Detect colonies
@@ -544,7 +553,8 @@ def colony_grid_table(
 def marker_plate_point_matching(
     colony_regions: pd.DataFrame,
     marker_plate_image: np.ndarray,
-    config: Configuration
+    config: Configuration,
+    image_notes: tuple | None = None
 ) -> tuple[np.ndarray | None, pd.DataFrame, float, float, float, float, list[np.ndarray], list[np.ndarray]]:
     """Match marker points to plate points using the Hungarian algorithm."""
     # Detect marker colonies
@@ -558,11 +568,16 @@ def marker_plate_point_matching(
     tetrad_centroids_indices = colony_regions[["centroid_x", "centroid_y"]].dropna().index
     
     if len(marker_centroids) == 0 or len(tetrad_centroids) == 0:
-        logger.error("No centroids detected in marker or tetrad images for matching.")
+        logger.error(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: No centroids detected in marker or tetrad images for matching.")
         return None, colony_regions, 1.0, 0.0, 0.0, 0.0, [], []
 
     # Match marker centroids to tetrad centroids
-    dist_matrix = cdist(marker_centroids, tetrad_centroids)
+    center_marker = np.mean(marker_centroids, axis=0)
+    center_tetrad = np.mean(tetrad_centroids, axis=0)
+    shift_vector = center_tetrad - center_marker
+    marker_centroids_aligned = marker_centroids + shift_vector
+
+    dist_matrix = cdist(marker_centroids_aligned, tetrad_centroids)
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     h_ref, w_ref = marker_plate_image.shape[:2]
     max_distance = config.max_match_distance_ratio * np.sqrt(h_ref**2 + w_ref**2)
@@ -599,7 +614,8 @@ def genotyping(
     binary_tetrad_image: np.ndarray,
     aligned_marker_image_gray: np.ndarray,
     colony_regions: pd.DataFrame,
-    radius: int = 15
+    radius: int = 15,
+    image_notes: tuple | None = None
 ) -> pd.DataFrame:
     """Genotype colonies based on tetrad binary image."""
     
@@ -617,7 +633,7 @@ def genotyping(
         tetrad_patch = binary_tetrad_image[y1:y2, x1:x2]
         marker_patch = aligned_marker_image_gray[y1:y2, x1:x2]
         if marker_patch.size == 0:
-            logger.warning(f"Empty marker patch for colony at index {idx}. Skipping genotype assignment.")
+            logger.warning(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: Empty marker patch for colony at index {idx}. Skipping genotype assignment.")
             colony_regions.loc[idx, "genotype"] = "Unknown"
             continue
         mean_tetrad_intensity = np.mean(tetrad_patch)
@@ -629,7 +645,7 @@ def genotyping(
         positive_signal_median = np.median(aligned_marker_image_gray[aligned_marker_image_gray > otsu_threshold])
 
         marker_intensity_threshold = max(50, otsu_threshold)
-        logger.debug(f"Using marker intensity threshold: {marker_intensity_threshold}")
+        # logger.debug(f"Using marker intensity threshold: {marker_intensity_threshold}")
         colony_regions.loc[idx, "tetrad_intensity"] = mean_tetrad_intensity
         colony_regions.loc[idx, "marker_intensity"] = mean_marker_intensity
         colony_regions.loc[idx, "median_tetrad_intensity"] = median_tetrad_intensity
@@ -752,7 +768,8 @@ def genotyping_pipeline(
         day_colonies[day]["image"] = image
         day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
             image,
-            config
+            config,
+            image_notes=day_colonies[day]["image_notes"]
         )
         if day == last_day and last_day_binary is None and last_day_colony_regions is None:
             last_day_binary = day_colonies[day]["binary_image"]
@@ -766,16 +783,16 @@ def genotyping_pipeline(
     marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
         last_day_colony_regions,
         marker_plate_image,
-        config
+        config,
+        image_notes=image_info
     )
 
     if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-        logger.error("Marker plate alignment failed. No aligned marker image available.")
+        logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
         marker_aligned = marker_plate_image
 
     marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-    genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
-
+    genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius, image_notes=image_info)
     all_colony_regions = pd.concat(
         [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
         axis=1
@@ -841,12 +858,12 @@ if __name__ == "__main__":
 # %% =========================== Manual Run ================================
 
 tetrad_image_paths={
-    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/3d/76_bud22_3d_#2_202411.cropped.png"),
-    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/4d/76_bud22_4d_#2_202411.cropped.png"),
-    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/5d/76_bud22_5d_#2_202411.cropped.png"),
-    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/6d/76_bud22_6d_#2_202411.cropped.png")
+    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/3d/66_isu1_3d_#2_202411.cropped.png"),
+    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/4d/66_isu1_4d_#2_202411.cropped.png"),
+    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/5d/66_isu1_5d_#2_202411.cropped.png"),
+    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/6d/66_isu1_6d_#2_202411.cropped.png")
 }
-marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/replica/76_bud22_HYG_#2_202411.cropped.png")
+marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/replica/66_isu1_HYG_#2_202411.cropped.png")
 
 config = Configuration(
     tetrad_image_paths=tetrad_image_paths,
@@ -857,13 +874,17 @@ last_day = max(config.tetrad_image_paths.keys())
 day_colonies = {}
 last_day_binary = None
 last_day_colony_regions = None
+
+# %%
 for day, day_image_path in config.tetrad_image_paths.items():
     day_colonies[day] = {}
     image = io.imread(day_image_path)
     day_colonies[day]["image"] = image
+    day_colonies[day]["image_notes"] = (day_image_path.stem, day)
     day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
         image,
-        config
+        config,
+        day_colonies[day]["image_notes"]
     )
     if day == last_day and last_day_binary is None and last_day_colony_regions is None:
         last_day_binary = day_colonies[day]["binary_image"]
@@ -873,6 +894,7 @@ for day, day_image_path in config.tetrad_image_paths.items():
 if last_day_binary is None or last_day_colony_regions is None:
     raise ValueError("No tetrad images were processed.")
 
+# %%
 marker_plate_image = io.imread(config.marker_image_path)
 marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
     last_day_colony_regions,
@@ -885,6 +907,7 @@ if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned
     marker_aligned = marker_plate_image
 
 marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+# %%
 genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
 
 all_colony_regions = pd.concat(
