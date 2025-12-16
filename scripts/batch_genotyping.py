@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from loguru import logger
 from tqdm import tqdm
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -21,6 +22,13 @@ DAY_IMAGE_COLUMNS = {
 }
 
 MARKER_IMAGE_COLUMN = "HYG_image_path"
+
+# %% ============================= Data Classes =============================
+@dataclass
+class configuration:
+    data_df: pd.DataFrame
+    pdf_output_path: Path
+    table_output_path: Path
 
 # %% ============================= Logging Setup =============================
 logger.remove()
@@ -45,13 +53,33 @@ logger.info("Starting batch genotyping process...")
 
 logger.info("Loading all images dataframe...")
 all_images_df = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
+bad_output_strain = pd.read_csv("../resource/bad_output_strain.csv")
 
+bad_output_strain_data = pd.merge(
+    all_images_df,
+    bad_output_strain,
+    on=["gene_num", "colony_id"],
+    how="inner"
+)
+
+config = configuration(
+    data_df=all_images_df,
+    pdf_output_path=Path("../results/batch_genotyping_results.pdf"),
+    table_output_path=Path("../results/batch_genotyping_results.xlsx")
+)
+
+# config = configuration(
+#     data_df=bad_output_strain_data,
+#     pdf_output_path=Path("../results/bad_output_strain.pdf"),
+#     table_output_path=Path("../results/bad_output_strain_genotyping_results.xlsx")
+# )
+# %%
 genotyping_failed = []
 all_colony_regions = {}
 n = 0
 logger.info("Beginning genotyping for each colony...")
-with PdfPages("../results/batch_genotyping_results.pdf") as pdf:
-    for idx, row in tqdm(all_images_df.iterrows(), total=len(all_images_df), desc="Batch Genotyping"):
+with PdfPages(config.pdf_output_path) as pdf:
+    for idx, row in tqdm(config.data_df.iterrows(), total=len(config.data_df), desc="Batch Genotyping"):
         round = row["round"]
         gene_num = row["gene_num"]
         gene_name = row["gene_name"]
@@ -108,7 +136,7 @@ for fail_info in genotyping_failed:
 concated_genotyping_results = pd.concat(all_colony_regions).rename_axis(
     index=["round", "gene_num", "gene_name", "colony_id", "date", "row", "col"]
 ).reset_index()
-concated_genotyping_results.to_excel("../results/batch_genotyping_results.xlsx", index=False)
+concated_genotyping_results.to_excel(config.table_output_path, index=False)
 
 # %%
 # tmp = pd.read_excel("../results/batch_genotyping_results.xlsx")
