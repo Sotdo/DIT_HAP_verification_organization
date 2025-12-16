@@ -10,14 +10,16 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from loguru import logger
 
+import pandas as pd
+
 sys.path.append(str(Path(__file__).parent.parent.resolve() / "src"))
 
-from image_processing import (
+from utils import roundConfig
+from tetrad_crop import (
     ImageProcessingConfig,
     process_tetrad_images,
-    # process_replica_images
+    process_time_course_tetrad_images
 )
-from utils import roundConfig
 
 # %% ------------------------------------ Configuration ------------------------------------ #
 
@@ -27,6 +29,9 @@ class BatchConfig:
     # Directories
     renamed_file_folder: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion")
     output_base_folder: Path = Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion")
+
+    use_table: bool = True # Whether to use the table for processed files
+    table_file: Path = Path("../results/all_combined_all_rounds_renamed_summary.xlsx")
     
     # Image processing parameters
     tetrad_config: ImageProcessingConfig = field(
@@ -34,7 +39,7 @@ class BatchConfig:
     )
     replica_config: ImageProcessingConfig = field(
         default_factory=lambda: ImageProcessingConfig(
-            min_colony_size=350,
+            min_colony_size=200,
             circularity_threshold=0.25,
             solidity_threshold=0.85,
             adaptive_block_size=200,
@@ -70,34 +75,49 @@ def main() -> None:
     logger.info(" ")
 
     config = BatchConfig()
-    all_rounds = [folder for folder in config.renamed_file_folder.iterdir() if folder.is_dir()]
 
-    for round_folder in all_rounds:
-        logger.info(f"{'#'*20} Processing round folder: {round_folder.name} {'#'*20}")
-        round_config = roundConfig(
-            raw_data_folder_path = config.renamed_file_folder,
-            round_folder_name = round_folder.name,  # Process the first round only for this example
-            output_folder_path = config.output_base_folder
+    if config.use_table:
+        logger.info("Loading processed file table...")
+
+        df = pd.read_excel(config.table_file)
+        logger.info(f"Loaded {len(df)} entries from the table.")
+        process_time_course_tetrad_images(
+            table_data = df,
+            tetrad_config = config.tetrad_config,
+            replica_config = config.replica_config,
+            output_base_folder = config.output_base_folder
         )
 
-        # Process tetrads
-        logger.info("*"*30 + "Processing tetrad images... " + "*"*30)
-        process_tetrad_images(
-            round_config=round_config,
-            image_processing_config=config.tetrad_config
-        )
-        
-        logger.info(" ")
-        logger.info("*"*30 + "Processing replica images... " + "*"*30)
-        process_tetrad_images(
-            round_config=round_config,
-            image_processing_config=config.replica_config,
-            replica=True
-        )
+    else:
+        logger.info("Processing all rounds from renamed file folder...")
+        all_rounds = [folder for folder in config.renamed_file_folder.iterdir() if folder.is_dir()]
 
-        logger.info(f"{'#'*20} Completed processing for round folder: {round_folder.name} {'#'*20}")
-        logger.info(" ")
-        logger.info(" ")
+        for round_folder in all_rounds:
+            logger.info(f"{'#'*20} Processing round folder: {round_folder.name} {'#'*20}")
+            round_config = roundConfig(
+                raw_data_folder_path = config.renamed_file_folder,
+                round_folder_name = round_folder.name,  # Process the first round only for this example
+                output_folder_path = config.output_base_folder
+            )
+
+            # Process tetrads
+            logger.info("*"*30 + "Processing tetrad images... " + "*"*30)
+            process_tetrad_images(
+                round_config=round_config,
+                image_processing_config=config.tetrad_config
+            )
+            
+            logger.info(" ")
+            logger.info("*"*30 + "Processing replica images... " + "*"*30)
+            process_tetrad_images(
+                round_config=round_config,
+                image_processing_config=config.replica_config,
+                replica=True
+            )
+
+            logger.info(f"{'#'*20} Completed processing for round folder: {round_folder.name} {'#'*20}")
+            logger.info(" ")
+            logger.info(" ")
 
 
 if __name__ == '__main__':
