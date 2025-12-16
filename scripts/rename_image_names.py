@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 from utils import verificationMetadata, roundConfig
 from rename_functions import rename_images_per_round
+from table_organizer import TableConfig, process_all_rounds
 # %% ------------------------------------ Main script ------------------------------------ #
 
 verification_meta = verificationMetadata()
@@ -21,5 +22,13 @@ for round_path in all_rounds:
             round=round_name,
             verification_metadata=verification_meta,
         )
+
+table_config = TableConfig(
+    image_base_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/processed_data/DIT_HAP_deletion"),
+    table_output_path=Path("../results/all_rounds_renamed_summary.xlsx"),
+    image_column_order=["3d", "4d", "5d", "6d", "YHZAY2A"]
+)
+
+process_all_rounds(table_config)
 
 # %%
