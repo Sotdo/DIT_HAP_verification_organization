@@ -52,7 +52,7 @@ def rename_image_name(
             "colony_id": 3,
             "day_or_selection_marker": "YHZAY2A"
         }
-    for image_file in tqdm(image_files):
+    for image_file in tqdm(image_files, desc=f"Renaming images in {subfolder_name}".ljust(30)):
         parts = image_file.stem.split("_")
         file_suffix = image_file.suffix
         gene_num = int(parts[element_idx.get("gene_num", 1)])
