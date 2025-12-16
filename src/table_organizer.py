@@ -20,13 +20,10 @@ from utils import verificationMetadata, roundConfig
 @dataclass
 class TableConfig:
     """Simple configuration for table organization."""
-    base_path: Path
-    output_path: Path
-    export_formats: list[str] = field(default_factory=lambda: ["csv", "xlsx"])
-
-    def __post_init__(self):
-        # Ensure output directory exists
-        self.output_path.mkdir(parents=True, exist_ok=True)
+    image_base_path: Path
+    table_output_path: Path
+    image_formats: list[str] = field(default_factory=lambda: ['tif', 'png', 'jpg'])
+    image_column_order: list[str] = field(default_factory=lambda: ['3d', '4d', '5d', '6d', 'YES', 'HYG', 'NAT', 'LEU', 'ADE'])
 
 
 # %% ------------------------------------ Helper Functions ------------------------------------ #
@@ -55,7 +52,7 @@ def parse_image_filename(image_path: Path) -> Optional[dict]:
         date_str = parts[4]
 
         # Determine if this is a time point or replica marker
-        replica_markers = ["YES", "HYG", "NAT", "LEU", "ADE"]
+        replica_markers = ["YES", "HYG", "NAT", "LEU", "ADE", "YHZAY2A"]
         is_replica = day_or_marker in replica_markers
 
         return {
@@ -86,8 +83,7 @@ def collect_images_for_round(round_name: str, config: TableConfig) -> list[dict]
     # Configure round paths
     round_config = roundConfig(
         round_folder_name=round_name,
-        raw_data_folder_path=config.base_path,
-        output_folder_path=config.base_path
+        raw_data_folder_path=config.image_base_path
     )
 
     all_image_data = []
@@ -100,16 +96,18 @@ def collect_images_for_round(round_name: str, config: TableConfig) -> list[dict]
             logger.warning(f"Input folder does not exist: {input_folder}")
             continue
 
-        # Find all PNG files
-        png_files = list(input_folder.glob("*.png"))
-        if not png_files:
-            logger.warning(f"No PNG files found in: {input_folder}")
+        # Find all image files
+        all_image_files = []
+        for image_format in config.image_formats:
+            image_files = list(input_folder.glob(f"*.{image_format}"))
+            all_image_files.extend(image_files)
+        
+        if not all_image_files:
+            logger.warning(f"No image files found in: {input_folder}")
             continue
 
-        logger.info(f"Processing {len(png_files)} images in {subfolder_name}")
-
-        for png_file in png_files:
-            metadata = parse_image_filename(png_file)
+        for image_file in all_image_files:
+            metadata = parse_image_filename(image_file)
             if metadata:
                 # Add round and subfolder information
                 metadata["round"] = round_name
@@ -177,7 +175,7 @@ def sort_dataframe_by_gene_and_colony(df: pd.DataFrame) -> pd.DataFrame:
     return df_sorted.drop(columns=['gene_num_int', 'colony_num'])
 
 
-def build_verification_dataframe(image_data: list[dict], verification_meta: verificationMetadata, round_name: str) -> pd.DataFrame:
+def build_verification_dataframe(image_data: list[dict], verification_meta: verificationMetadata, round_name: str, image_column_order: list[str]) -> pd.DataFrame:
     """Create verification DataFrame from image metadata.
 
     Args:
@@ -229,9 +227,6 @@ def build_verification_dataframe(image_data: list[dict], verification_meta: veri
             "Kept": ""
         }
 
-        # Define the desired order for image path columns
-        image_column_order = ["3d", "4d", "5d", "6d", "YES", "HYG", "NAT", "LEU", "ADE"]
-
         # Initialize all image path columns to empty strings first
         for column in image_column_order:
             record[f"{column}_image_path"] = ""
@@ -259,17 +254,15 @@ def export_verification_table(df: pd.DataFrame, round_name: str, config: TableCo
         round_name: Name of the experimental round
         config: Table configuration
     """
-    round_output_path = config.output_path / round_name
-    round_output_path.mkdir(parents=True, exist_ok=True)
+    config.table_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Export main verification table
-    for format_type in config.export_formats:
-        if format_type == "csv":
-            df.to_csv(round_output_path / f"{round_name}_verification_table.csv", index=False)
-        elif format_type == "xlsx":
-            df.to_excel(round_output_path / f"{round_name}_verification_table.xlsx", index=False)
+    if config.table_output_path.suffix == ".csv":
+        df.to_csv(config.table_output_path, index=False)
+    elif config.table_output_path.suffix == ".xlsx":
+        df.to_excel(config.table_output_path.parent, index=False)
 
-    logger.info(f"Exported {format_type.upper()} for round {round_name}")
+    logger.info(f"Exported {config.table_output_path.suffix.upper()} for round {round_name}")
 
 
 def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: TableConfig):
@@ -279,23 +272,19 @@ def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: 
         all_rounds_data: Dictionary with round names as keys and DataFrames as values
         config: Table configuration
     """
-    output_file = config.output_path / "all_rounds_verification_summary.xlsx"
 
     # Create summary statistics
     summary_data = []
     for round_name, df in all_rounds_data.items():
         if not df.empty:
             total_records = len(df)
-            complete_time_series = len(df.dropna(subset=['3d_image_path', '4d_image_path', '5d_image_path', '6d_image_path'], how='all'))
-            complete_replicas = len(df.dropna(subset=['YES_image_path', 'HYG_image_path', 'NAT_image_path', 'LEU_image_path', 'ADE_image_path'], how='all'))
+            complete_images = df.dropna(subset=[f"{col}_image_path" for col in config.image_column_order], how='any')
 
             summary_data.append({
                 'Round': round_name,
                 'Total Records': total_records,
-                'Complete Time Series': complete_time_series,
-                'Complete Replicas': complete_replicas,
-                'Time Series Completion %': (complete_time_series / total_records * 100) if total_records > 0 else 0,
-                'Replica Completion %': (complete_replicas / total_records * 100) if total_records > 0 else 0
+                'Complete Image Sets': len(complete_images),
+                'Completion Rate (%)': (len(complete_images) / total_records * 100) if total_records > 0 else 0
             })
 
     summary_df = pd.DataFrame(summary_data)
@@ -317,7 +306,7 @@ def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: 
         concatenated_df = sort_dataframe_by_gene_and_colony(concatenated_df)
 
     # Export individual round sheets file
-    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+    with pd.ExcelWriter(config.table_output_path, engine='openpyxl') as writer:
         # Add summary sheet first
         summary_df.to_excel(writer, sheet_name='Summary', index=False)
 
@@ -329,16 +318,16 @@ def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: 
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
                 logger.info(f"Added sheet '{sheet_name}' with {len(df)} records")
 
-    logger.success(f"Individual round sheets exported to: {output_file}")
+    logger.success(f"Individual round sheets exported to: {config.table_output_path}")
 
     # Export independent file with all rounds combined
     if not concatenated_df.empty:
-        combined_output_file = config.output_path / "all_rounds_combined_verification_summary.xlsx"
+        combined_output_file = config.table_output_path.parent / f"all_combined_{config.table_output_path.name}"
         concatenated_df.to_excel(combined_output_file, sheet_name='All Rounds Combined', index=False)
         logger.success(f"Combined rounds exported to independent Excel file: {combined_output_file}")
         logger.info(f"Combined file contains {len(concatenated_df)} total records from {len(all_rounds_data)} rounds")
 
-    return output_file
+    return config.table_output_path
 
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
@@ -367,7 +356,7 @@ def create_verification_table(round_name: str, config: TableConfig) -> pd.DataFr
     logger.info(f"Creating verification table with {len(image_data)} image records")
 
     # Build verification DataFrame
-    df = build_verification_dataframe(image_data, verification_meta, round_name)
+    df = build_verification_dataframe(image_data, verification_meta, round_name, config.image_column_order)
 
     logger.info(f"Created verification table with {len(df)} records")
     return df
@@ -404,7 +393,7 @@ def process_all_rounds(config: TableConfig):
         config: Table configuration
     """
     # Find all available rounds
-    base_data_path = config.base_path
+    base_data_path = config.image_base_path
 
     if not base_data_path.exists():
         logger.error(f"Base data path does not exist: {base_data_path}")
@@ -459,7 +448,8 @@ def process_all_rounds(config: TableConfig):
 if __name__ == "__main__":
     # Example usage
     config = TableConfig(
-        base_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"),
-        output_path=Path("../results")
+        image_base_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"),
+        table_output_path=Path("../results/all_rounds_verification_summary.xlsx"),
+        image_column_order=["3d", "4d", "5d", "6d", "YES", "HYG", "NAT", "LEU", "ADE"]
     )
     process_all_rounds(config)
