@@ -37,11 +37,11 @@ class OrganizeTablesConfig:
     # Table organization configuration
     table_config: TableConfig = field(
         default_factory=lambda: TableConfig(
-            base_path=Path(
+            image_base_path=Path(
                 "/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion"
             ),
-            output_path=Path(
-                "../results"
+            table_output_path=Path(
+                "../results/all_rounds_crop_summary.xlsx"
             )
         )
     )
@@ -64,22 +64,62 @@ class OrganizeTablesConfig:
     create_samples: bool = False
     rounds_to_process: list[str] = field(default_factory=list)  # Empty = all rounds
     # rounds_to_process: list[str] = field(default_factory=lambda: ["18th_round"])  # Empty = all rounds
+    # gene_nums: list[int] = field(default_factory=lambda: [
+    #         243,
+    #         249,
+    #         255,
+    #         256,
+    #         262,
+    #         265,
+    #         273,
+    #         279,
+    #         280,
+    #         281,
+    #         292,
+    #         296,
+    #         297,
+    #         300,
+    #         307
+    #     ]
+    # )
     gene_nums: list[int] = field(default_factory=lambda: [
-            243,
-            249,
-            255,
+            75,
+            78,
+            80,
+            88,
+            99,
+            109,
+            119,
+            126,
+            138,
+            139,
+            141,
+            147,
+            149,
+            149,
+            157,
+            159,
+            161,
+            168,
+            180,
+            188,
+            190,
+            190,
+            192,
+            193,
+            202,
+            215,
+            241,
             256,
-            262,
-            265,
-            273,
-            279,
+            264,
+            268,
+            276,
+            277,
             280,
-            281,
-            292,
-            296,
-            297,
-            300,
-            307
+            313,
+            321,
+            323,
+            333
         ]
     )
     genes: list[str] = field(default_factory=lambda: [
@@ -131,13 +171,13 @@ class OrganizeTablesConfig:
     
     def __post_init__(self):
         # Ensure output directories exist
-        self.table_config.output_path.mkdir(parents=True, exist_ok=True)
+        self.table_config.table_output_path.parent.mkdir(parents=True, exist_ok=True)
         self.pdf_config.output_base_path.mkdir(parents=True, exist_ok=True)
 
         # Set base paths in sub-configurations
-        self.table_config.base_path = self.processed_data_base_path
+        self.table_config.image_base_path = self.processed_data_base_path
         self.pdf_config.processed_data_base_path = self.processed_data_base_path
-        self.pdf_config.table_structures_path = self.table_config.output_path
+        self.pdf_config.table_structures_path = self.table_config.table_output_path.parent
 
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
@@ -245,7 +285,7 @@ def verify_prerequisites(config: OrganizeTablesConfig) -> bool:
 
     # Check for table structures if generating PDFs
     if config.generate_pdfs:
-        table_structures_dir = config.table_config.output_path
+        table_structures_dir = config.table_config.table_output_path.parent
         if not table_structures_dir.exists():
             if config.process_tables:
                 logger.warning("Table structures directory not found, will be created during table processing")
