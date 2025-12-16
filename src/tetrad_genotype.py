@@ -243,8 +243,8 @@ def detect_colonies(
         pass
     else:
         h, w = binary_image.shape
-        x_min, x_max = w * 0.02, w * 0.98
-        y_min, y_max = h * 0.02, h * 0.98
+        x_min, x_max = w * 0.01, w * 0.99
+        y_min, y_max = h * 0.01, h * 0.99
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {x_min} and centroid_x <= {x_max} and centroid_y >= {y_min} and centroid_y <= {y_max}"
         ).copy()
@@ -327,6 +327,10 @@ def colony_grid_fitting(
         lambda group: group.loc[group["distance"].idxmin()],
         include_groups=False
     ).reset_index(drop=True)
+
+    dedup_colony_regions = dedup_colony_regions.query(
+        "distance <= 10"
+    ).copy()
 
     return fitted_grid, dedup_colony_regions
 
