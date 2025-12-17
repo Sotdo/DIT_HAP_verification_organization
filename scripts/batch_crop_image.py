@@ -39,9 +39,12 @@ class BatchConfig:
     )
     replica_config: ImageProcessingConfig = field(
         default_factory=lambda: ImageProcessingConfig(
-            min_colony_size=200,
-            circularity_threshold=0.25,
-            solidity_threshold=0.85,
+            height_range = (45, 85),
+            width_range = (10, 90),
+            min_colony_size=50,
+            max_colony_size=5000,
+            circularity_threshold=0.45,
+            solidity_threshold=0.8,
             adaptive_block_size=200,
             contrast_alpha=1.6
         )
@@ -80,6 +83,7 @@ def main() -> None:
         logger.info("Loading processed file table...")
 
         df = pd.read_excel(config.table_file)
+        # df = df.query("gene_num == 280")
         logger.info(f"Loaded {len(df)} entries from the table.")
         process_time_course_tetrad_images(
             table_data = df,
