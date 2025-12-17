@@ -50,17 +50,18 @@ class ImageProcessingConfig:
     """Configuration for image processing."""
 
     # plate parameters
-    target_radius: int = 490  # plate radius in pixels
+    target_radius: int = 515  # plate radius in pixels
 
     # plate narrowing parameters
-    height_range: tuple[int, int] = (45, 85)
-    width_range: tuple[int, int] = (5, 95)
+    height_range: tuple[int, int] = (47, 79)
+    width_range: tuple[int, int] = (10, 90)
 
     # binary processing parameters
     adaptive_thresh_c: int = 2
     normal_centroid_deviation_px: int = 15
     max_centroid_deviation_px: int | None = 100
-    min_colony_size: int = 5 # minimum colony size in pixels, 50 for tetrads, 100 for replicas
+    min_colony_size: int = 5 # minimum colony size in pixels, 5 for tetrads, 50 for replicas
+    max_colony_size: int = 2000 # maximum colony size in pixels, 2000 for tetrads, 4000 for replicas
     circularity_threshold: float = 0.7 # circularity threshold for colony detection, 0.7 for tetrads, 0.5 for replicas
     solidity_threshold: float = 0.9 # solidity threshold for colony detection, 0.8 for tetrads, 0.7 for replicas
     adaptive_block_size: int = 30 # must be odd number, 30 for tetrads, 120 for replicas
@@ -75,7 +76,7 @@ class ImageProcessingConfig:
 @logger.catch
 def find_circle_plates(
     image: str | Path | np.ndarray,
-    target_radius: int = 490,
+    target_radius: int = 515,
     min_dist: float = 500,
     param1: int = 100,
     param2: int = 50,
@@ -92,23 +93,31 @@ def find_circle_plates(
 
     blurred = cv2.bilateralFilter(img, 9, 75, 75)  # Edge-preserving blur
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    edges = cv2.Canny(blurred, 30, 100)
     enhanced = clahe.apply(blurred)
-    binary = enhanced[enhanced > 10]
+    otsu_threshold, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     min_radius = target_radius - 25
     max_radius = target_radius + 25
+
     # Detect circles using Hough transform
-    circles = cv2.HoughCircles(
-        binary, cv2.HOUGH_GRADIENT,
-        dp=dp, minDist=min_dist,
-        param1=param1, param2=param2,
-        minRadius=min_radius, maxRadius=max_radius
-    )
+    param1 = 50
+    param2 = 30
+    while param1 > 30:
+        circles = cv2.HoughCircles(
+            edges, cv2.HOUGH_GRADIENT,
+            dp=dp, minDist=min_dist,
+            param1=param1, param2=param2,
+            minRadius=min_radius, maxRadius=max_radius
+        )
+        if circles is not None:
+            return circles[0]
+        param1 -= 2  # Decrease the higher threshold to be more sensitive
   
-    if circles is not None:
-        return circles[0]
-    else:
-        init_param1 = param1
+    param1 = 100
+    param2 = 50
+    if circles is None:
+        # logger.warning("No circles detected with initial parameters in image, trying adaptive param1.")
         while param1 > 30:
             circles = cv2.HoughCircles(
                 enhanced, cv2.HOUGH_GRADIENT,
@@ -119,32 +128,8 @@ def find_circle_plates(
             if circles is not None:
                 return circles[0]
             param1 -= 2  # Decrease the higher threshold to be more sensitive
-        
-        if circles is None:
-            min_radius = target_radius - 50
-            max_radius = target_radius + 50
-            circles = cv2.HoughCircles(
-                enhanced, cv2.HOUGH_GRADIENT,
-                dp=dp, minDist=min_dist,
-                param1=param1, param2=param2,
-                minRadius=min_radius, maxRadius=max_radius
-            )
-            if circles is not None:
-                return circles[0]
-            else:
-                param1 = init_param1
-                while param1 > 30:
-                    circles = cv2.HoughCircles(
-                        enhanced, cv2.HOUGH_GRADIENT,
-                        dp=dp, minDist=min_dist,
-                        param1=param1, param2=param2,
-                        minRadius=min_radius, maxRadius=max_radius
-                    )
-                    if circles is not None:
-                        return circles[0]
-                    param1 -= 2  # Decrease the higher threshold to be more sensitive
-                
-                logger.error(f"No circles detected in image: {image}")
+
+    logger.error("** No circles detected in image even after adaptive param1 adjustment. **")
     return None
 
 @logger.catch
@@ -210,23 +195,11 @@ def remove_background(
 @logger.catch
 def binarize_image(
     gray_image: np.ndarray,
-    replica: bool = False,
+    otsu_scale_factor: float = 0.7,
 ) -> tuple[np.ndarray, float]:
     """Binarize the grayscale image using Otsu's thresholding."""
-    if replica:
-        # Apply adaptive thresholding for replica images
-        block_size = 201 if gray_image.shape[0] > 500 else 101
-        thresh = cv2.adaptiveThreshold(
-            gray_image,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            block_size,
-            -2
-        )
-    else:
-        # Apply Otsu's thresholding
-        otsu_threshold, thresh = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_threshold, thresh = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thresh = np.where(gray_image >= otsu_scale_factor*otsu_threshold, 255, 0).astype(np.uint8)
 
     signal_ratio = np.sum(thresh > 0) / thresh.size
     # if replica and signal_ratio < 0.15:
@@ -247,7 +220,7 @@ def morphological_processing(
     # opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
     dilated = cv2.morphologyEx(binary_image, cv2.MORPH_DILATE, kernel, iterations=1)
     # Fill holes in the binary image
-    thresh_hole_filled = np.array(ndimage.binary_fill_holes(dilated)).astype(np.uint8) * 255
+    thresh_hole_filled = np.array(ndimage.binary_fill_holes(dilated)).astype(np.uint8)
     eroded = cv2.morphologyEx(thresh_hole_filled, cv2.MORPH_ERODE, kernel, iterations=1)
 
     processed = eroded
@@ -256,15 +229,19 @@ def morphological_processing(
 
 @logger.catch
 def watershed_segmentation(
-    gray_image: np.ndarray,
-    binary_image: np.ndarray
+    binary_image: np.ndarray,
+    watershed_threshold: float = 0.2
 ) -> list[np.ndarray]:
     """Apply watershed segmentation to separate touching colonies."""
     # Distance transform
     dist_transform = cv2.distanceTransform(binary_image, cv2.DIST_L2, 5)
 
     # Find local maxima as markers
-    _, sure_fg = cv2.threshold(dist_transform, 0.3 * dist_transform.max(), 255, 0)
+    _, sure_fg = cv2.threshold(
+        dist_transform,
+        watershed_threshold * dist_transform.max(),
+        255, 0
+    )
     sure_fg = np.uint8(sure_fg)
 
     # Find unknown region
@@ -278,7 +255,7 @@ def watershed_segmentation(
     markers[unknown == 255] = 0  # Mark unknown region as 0
 
     # Apply watershed
-    plate_bgr = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
+    plate_bgr = cv2.cvtColor(binary_image, cv2.COLOR_GRAY2BGR)
     markers = cv2.watershed(plate_bgr, markers)
 
     # Convert watershed labels back to contours with robust detection
@@ -310,6 +287,80 @@ def watershed_segmentation(
     return contours
 
 @logger.catch
+def detect_and_separate_colonies(
+    binary_image: np.ndarray,
+    plate_config: ImageProcessingConfig
+) -> list[np.ndarray]:
+    """
+    Detect colonies using cv2.findContours, then apply watershed to separate touching colonies.
+    
+    Strategy:
+    1. Use cv2.findContours to detect all colonies (high sensitivity)
+    2. Identify suspected merged colonies (large area, low circularity)
+    3. Apply watershed only on suspected regions
+    4. Return all separated contours
+    """
+    # Step 1: Find all contours using cv2.findContours (most sensitive)
+    initial_contours = cv2.findContours(
+        binary_image,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )[0]
+    
+    final_contours = []
+    
+    for contour in initial_contours:
+        area = cv2.contourArea(contour)
+        
+        # Skip very small noise
+        if area < plate_config.min_colony_size / 2:
+            continue
+        
+        # Calculate shape metrics
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            continue
+            
+        circularity = (4 * np.pi * area) / (perimeter * perimeter)
+        
+        # Determine if this might be multiple touching colonies
+        # Low circularity or large area suggests merged colonies
+        expected_single_colony_area = plate_config.min_colony_size * 4
+        is_suspected_merged = (
+            circularity < 0.6 or  # Very irregular shape
+            area > expected_single_colony_area  # Unusually large
+        )
+        
+        if is_suspected_merged:
+            # Create a mask for just this contour
+            contour_mask = np.zeros_like(binary_image)
+            cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+            
+            # Extract the region
+            x, y, w, h = cv2.boundingRect(contour)
+            roi_mask = contour_mask[y:y+h, x:x+w]
+            roi_gray = binary_image[y:y+h, x:x+w]
+            
+            # Apply watershed on this specific region
+            separated_contours = watershed_segmentation(roi_gray, roi_mask, watershed_threshold=0.3)
+            
+            # If watershed successfully separated colonies, use those
+            if len(separated_contours) > 1:
+                # Offset contours back to original image coordinates
+                for sep_contour in separated_contours:
+                    sep_contour[:, 0, 0] += x
+                    sep_contour[:, 0, 1] += y
+                    final_contours.append(sep_contour)
+            else:
+                # Watershed didn't separate, keep original
+                final_contours.append(contour)
+        else:
+            # Single colony, keep as-is
+            final_contours.append(contour)
+    
+    return final_contours
+
+@logger.catch
 def filter_contours(
     contours: list[np.ndarray],
     plate_config: ImageProcessingConfig
@@ -330,7 +381,7 @@ def filter_contours(
         solidity = area / hull_area if hull_area > 0 else 0
         # convexity = perimeter / hull_perimeter if hull_perimeter > 0 else 0
         
-        if area > plate_config.min_colony_size and circularity > plate_config.circularity_threshold and solidity > plate_config.solidity_threshold:
+        if area > plate_config.min_colony_size and area < plate_config.max_colony_size and circularity > plate_config.circularity_threshold and solidity > plate_config.solidity_threshold:
             filtered_contours.append(contour)
             M = cv2.moments(contour)
             if M["m00"] != 0:
@@ -397,39 +448,43 @@ def find_tetrad_centroid(
     """Find colony centroids in a plate image using OpenCV."""
     # only use red channel for grayscale conversion
     gray = plate[:, :, 2] if len(plate.shape) == 3 else plate
-    h, w = gray.shape[:2]
+    h, w = gray.shape
     if gray is None:
         raise ValueError("Input plate_image is invalid or could not be converted to grayscale.")
 
     # Crop to specified height and width ranges
     start_h, end_h = int(h * plate_config.height_range[0] / 100), int(h * plate_config.height_range[1] / 100)
     start_w, end_w = int(w * plate_config.width_range[0] / 100), int(w * plate_config.width_range[1] / 100)
-    gray = gray[start_h:end_h, start_w:end_w]
+    gray_cropped = gray[start_h:end_h, start_w:end_w]
 
-    # remove noise with Gaussian blur
-    if replica:
-        gray = cv2.GaussianBlur(gray, (9, 9), 0)
-        # remove the background signal by reducing the 10th percentile of the positive signal
-        gray = remove_background(gray, threshold_percentile=50)
-    else:
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-        # remove the background signal by reducing the 10th percentile of the positive signal
-        gray = remove_background(gray, threshold_percentile=30)
+    # # remove noise with Gaussian blur
+    # if replica:
+    #     gray = cv2.GaussianBlur(gray, (9, 9), 0)
+    #     # remove the background signal by reducing the 10th percentile of the positive signal
+    #     gray = remove_background(gray, threshold_percentile=50)
+    #     # gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    #     # # remove the background signal by reducing the 10th percentile of the positive signal
+    #     # gray = remove_background(gray, threshold_percentile=30)
+    # else:
+    blurred = cv2.GaussianBlur(gray_cropped, (5, 5), 0)
+    # remove the background signal by reducing the 10th percentile of the positive signal
+    bg_removed = remove_background(blurred, threshold_percentile=30)
 
     # enhance contrast using CLAHE
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(15,15))
-    enhanced = clahe.apply(gray)
+    enhanced = clahe.apply(bg_removed)
 
-    normalized = cv2.normalize(enhanced, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    # normalized = cv2.normalize(enhanced, dst=None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     
     # apply otsu's thresholding
-    thresh, signal_ratio = binarize_image(normalized, replica=replica)
+    thresh, signal_ratio = binarize_image(enhanced)
 
     # Morphological operations
     processed = morphological_processing(thresh)
 
-    # Apply watershed segmentation to separate touching colonies
-    contours = watershed_segmentation(normalized, processed)
+    # Detect colonies using combined approach: cv2.findContours + selective watershed
+    # contours = detect_and_separate_colonies(processed, plate_config)
+    contours = watershed_segmentation(processed, watershed_threshold=0.2)
     
     # Filter contours based on area, circularity, and solidity
     filtered_contours, colony_centroids = filter_contours(contours, plate_config)
@@ -437,8 +492,8 @@ def find_tetrad_centroid(
     # Calculate centroid
     tetrad_centroid = calculate_centroids(processed, colony_centroids)
     
-    # Visualize detected contours
-    viz_image = visualize_contours(plate_config, processed, filtered_contours, tetrad_centroid)
+    # Visualize detected contours (use normalized grayscale as background to see actual colonies)
+    viz_image = visualize_contours(plate_config, processed*255, filtered_contours, tetrad_centroid)
 
     # transform centroid back to original plate coordinates
     centroid_x, centroid_y = tetrad_centroid
@@ -470,8 +525,14 @@ def process_plates(
             'viz_image': viz_image,
             'colony_centroids': colony_centroids,
             'start_w': start_w,
-            'start_h': start_h
+            'start_h': start_h,
+            'distance_to_center': (abs(centroid_x - plate_image.shape[1] // 2), abs(centroid_y - plate_image.shape[0] // 2))
         })
+
+    # Calculate median distance to center for outlier detection
+    distances_to_center = [p['distance_to_center'] for p in processed_plates]
+    median_distance = np.median(distances_to_center, axis=0)
+    logger.info(f"Median distance to center: {median_distance}")
 
     # Centroid adjustment for both tetrad and replica plates
     if plate_config.max_centroid_deviation_px is not None:
@@ -527,7 +588,7 @@ def process_time_course_plates(
     for plate_path, plate_image_dict in plate_images.items():
         plate_tag = plate_image_dict['plate_tag']
         plate_image = plate_image_dict['plate_image']
-        if plate_tag.startswith(REPLICA_NAME):
+        if plate_tag == "replica":
             replica = True
             plate_config = replica_plate_config
         else:
@@ -541,37 +602,55 @@ def process_time_course_plates(
             'viz_image': viz_image,
             'colony_centroids': colony_centroids,
             'start_w': start_w,
-            'start_h': start_h
+            'start_h': start_h,
+            'distance_to_center': (centroid_x - plate_image.shape[1] // 2, centroid_y - plate_image.shape[0] // 2)
         })
 
     plate_config = tetrad_plate_config
-    # Centroid adjustment for both tetrad and replica plates
+
+
+    # ---- Centroid adjustment for both tetrad and replica plates ----
     if plate_config.max_centroid_deviation_px is not None:
         # calculate average centroid
         tetrad_centroids = np.array([p['centroid'] for p in processed_plates if p["plate_tag"] != "replica"])
         replica_centroids = np.array([p['centroid'] for p in processed_plates if p["plate_tag"] == "replica"])
-        avg_tetrad_centroid = np.mean(tetrad_centroids, axis=0)
-        avg_replica_centroid = np.mean(replica_centroids, axis=0)
+        
+        # Calculate means only if arrays are not empty
+        avg_tetrad_centroid = np.mean(tetrad_centroids, axis=0) if len(tetrad_centroids) > 0 else None
+        avg_replica_centroid = np.mean(replica_centroids, axis=0) if len(replica_centroids) > 0 else None
+
         for p in processed_plates:
-            n_centroids = len(p["colony_centroids"])
+            
             if p["plate_tag"] == "replica":
                 avg_centroid = avg_replica_centroid
             else:
                 avg_centroid = avg_tetrad_centroid
-            dist = np.linalg.norm(np.array(p['centroid']) - avg_centroid)
+            
+            # Skip centroid adjustment if no average is available
+            if avg_centroid is None:
+                p['final_centroid'] = p['centroid']
+                continue
+
+            plate_center = (p["plate_image"].shape[1] // 2, p["plate_image"].shape[0] // 2)
+            tetrad_center_from_plate_center = (plate_center[0] + 20, plate_center[1] + 120)
+
+            avg_tetrad_center = (np.array(tetrad_center_from_plate_center) + np.array(avg_centroid)) / 2
+            dist = np.linalg.norm(np.array(p['centroid']) - avg_tetrad_center)
             if dist > plate_config.max_centroid_deviation_px:
                 logger.warning(f"Large centroid deviation detected: {dist:.1f}px for centroid {p['centroid']} vs average {tuple(avg_centroid.astype(int))}")
-                p['final_centroid'] = tuple(avg_centroid.astype(int))
+                p['final_centroid'] = (avg_tetrad_center).astype(int)
             elif dist > plate_config.normal_centroid_deviation_px:
-                new_centroid = np.round((np.array(p['centroid']) + avg_centroid) / 2)
+                new_centroid = np.round((np.array(p['centroid']) + avg_tetrad_center) / 2)
                 # logger.info(f"Adjusting centroid from {p['centroid']} to {tuple(new_centroid.astype(int))} (deviation: {dist:.1f}px)")
                 p['final_centroid'] = tuple(new_centroid.astype(int))
             else:
                 p['final_centroid'] = p['centroid']
             
+            draw_tetrad_center = np.array(tetrad_center_from_plate_center) - np.array([p['start_w'], p['start_h']])
             draw_init_centroid = np.array(p['centroid']) - np.array([p['start_w'], p['start_h']])
             draw_final_centroid = np.array(p['final_centroid']) - np.array([p['start_w'], p['start_h']])
             draw_avg_centroid = np.array(avg_centroid) - np.array([p['start_w'], p['start_h']])
+            cv2.rectangle(p["viz_image"], (draw_tetrad_center[0]-10, draw_tetrad_center[1]-10), (draw_tetrad_center[0]+10, draw_tetrad_center[1]+10), (0, 255, 0), -1)
             cv2.circle(p["viz_image"], tuple(draw_avg_centroid.astype(int)), 10, (0, 255, 255), -1)
             cv2.circle(p["viz_image"], tuple(draw_final_centroid.astype(int)), 10, (255, 0, 0), -1)
             cv2.arrowedLine(p["viz_image"], tuple(draw_init_centroid.astype(int)), tuple(draw_final_centroid.astype(int)), (255, 0, 255), 2)
@@ -823,3 +902,5 @@ def process_time_course_tetrad_images(
                 for f_img in failed_images:
                     logger.error(f" - {f_img}")
                 logger.error("*-" * 70)
+
+# %%
