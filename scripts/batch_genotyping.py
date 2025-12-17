@@ -29,24 +29,9 @@ class configuration:
     data_df: pd.DataFrame
     pdf_output_path: Path
     table_output_path: Path
+    log_file: Path = Path("../logs/batch_genotyping.log")
 
-# %% ============================= Logging Setup =============================
-logger.remove()
-logger.add(
-    sys.stdout,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
-           "<level>{level: <8}</level> | "
-           "<cyan>{module: <20}</cyan>:<cyan>{line: <4}</cyan> - | "
-           "<level>{message}</level>",
-    level="INFO"
-)
 
-logger.add(
-    "../logs/batch_genotyping.log",
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {module: <20}:{line: <4} - | {message}",
-    level="DEBUG",
-    mode="w"
-)
 
 # %% ============================= Main =============================
 logger.info("Starting batch genotyping process...")
@@ -62,17 +47,36 @@ bad_output_strain_data = pd.merge(
     how="inner"
 )
 
+# config = configuration(
+#     data_df=all_images_df,
+#     pdf_output_path=Path("../results/batch_genotyping_results.pdf"),
+#     table_output_path=Path("../results/batch_genotyping_results.xlsx")
+# )
+
 config = configuration(
-    data_df=all_images_df,
-    pdf_output_path=Path("../results/batch_genotyping_results.pdf"),
-    table_output_path=Path("../results/batch_genotyping_results.xlsx")
+    data_df=bad_output_strain_data,
+    pdf_output_path=Path("../results/bad_output_strain.pdf"),
+    table_output_path=Path("../results/bad_output_strain_genotyping_results.xlsx"),
+    log_file=Path("../logs/batch_genotyping_bad_output_strain.log")
 )
 
-# config = configuration(
-#     data_df=bad_output_strain_data,
-#     pdf_output_path=Path("../results/bad_output_strain.pdf"),
-#     table_output_path=Path("../results/bad_output_strain_genotyping_results.xlsx")
-# )
+#  %% ============================= Logging Setup =============================
+logger.remove()
+logger.add(
+    sys.stdout,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+           "<level>{level: <8}</level> | "
+           "<cyan>{module: <20}</cyan>:<cyan>{line: <4}</cyan> - | "
+           "<level>{message}</level>",
+    level="INFO"
+)
+
+logger.add(
+    str(config.log_file),
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {module: <20}:{line: <4} - | {message}",
+    level="DEBUG",
+    mode="w"
+)
 # %%
 genotyping_failed = []
 all_colony_regions = {}
