@@ -78,8 +78,8 @@ class Configuration:
     # Colony detection parameters
     # tetrad plate
     tetrad_gray_method: str = "mean"
-    tetrad_gaussian_sigma: float = 1.0 # smaller sigma for sharper colonies, larger sigma for smoother colonies
-    tetrad_min_area: int = 5 # minimum area of colonies to be detected
+    tetrad_gaussian_sigma: float = 0.1 # smaller sigma for sharper colonies, larger sigma for smoother colonies
+    tetrad_min_area: int = 1 # minimum area of colonies to be detected
     tetrad_max_area: int = 2000 # maximum area of colonies to be detected
 
     # marker plate
@@ -165,24 +165,27 @@ def binarize_image(
         image = convert_to_grayscale(image, channel=channel)
     
     # Apply Gaussian blur
-    blurred = apply_gaussian_blur(image, sigma=sigma)
+    blur = apply_gaussian_blur(image, sigma=sigma)
     
     # Direct thresholding if threshold is provided
     if threshold is not None:
-        binary = blurred > threshold
+        binary = blur > threshold
     else:
         # Use Otsu's method to determine threshold
-        thresh = threshold_otsu(blurred)
-        binary = blurred > thresh
+        thresh = threshold_otsu(blur)
+        binary = blur > thresh
 
     signal_pixels_ratio = np.sum(binary) / binary.size
     if (signal_pixels_ratio < 0.05 or signal_pixels_ratio > 0.9) and channel is not None:
-        threshold = np.percentile(blurred, 85)
+        threshold = np.percentile(blur, 85)
         logger.warning(f"**** {' '.join(map(str, image_notes)) if image_notes else ''}: Unusual signal pixel ratio: {signal_pixels_ratio:.4f}. Using 85th percentile threshold: {threshold:.2f}")
-        binary = blurred > threshold
+        binary = blur > threshold
 
-    # Apply morphological operations
-    morphed = apply_morphology(binary, disk_size=disk_size, operation=operation)
+    if channel is None:
+        morphed = binary
+    else:
+        # Apply morphological operations
+        morphed = apply_morphology(binary, disk_size=disk_size, operation=operation)
 
     return morphed
 
@@ -214,7 +217,7 @@ def watershed_segmentation(
 @logger.catch
 def detect_colonies(
     binary_image: np.ndarray,
-    min_area: int = 5,
+    min_area: int = 4,
     max_area: int = 2000,
     is_marker: bool = False,
     segmentation: bool = False,
@@ -242,13 +245,34 @@ def detect_colonies(
     if is_marker:
         pass
     else:
+        # use the colonies above 25th percentile area to determine the tetrad grid boundary
+        area_25th_percentile = filtered_regions["area"].quantile(0.25)
+        large_colonies = filtered_regions.query(f"area >= {area_25th_percentile}").copy()
+        x_min, x_max = large_colonies["centroid_x"].min(), large_colonies["centroid_x"].max()
+        y_min, y_max = large_colonies["centroid_y"].min(), large_colonies["centroid_y"].max()
+
         h, w = binary_image.shape
-        x_min, x_max = w * 0.01, w * 0.99
-        y_min, y_max = h * 0.01, h * 0.99
+        tetrad_x_min = max(0, x_min - 30)
+        tetrad_x_max = min(w, x_max + 30)
+        tetrad_y_min = max(0, y_min - 30)
+        tetrad_y_max = min(h, y_max + 30)
+
         filtered_regions = filtered_regions.query(
-            f"centroid_x >= {x_min} and centroid_x <= {x_max} and centroid_y >= {y_min} and centroid_y <= {y_max}"
+            f"centroid_x >= {tetrad_x_min} and centroid_x <= {tetrad_x_max} and centroid_y >= {tetrad_y_min} and centroid_y <= {tetrad_y_max}"
         ).copy()
         filtered_regions = filtered_regions.query("eccentricity <= 0.6").copy()
+
+    if filtered_regions.shape[0] > 48:
+        # filter the colonies with extreme positions
+        x_lower_bound = filtered_regions["centroid_x"].quantile(0.05)
+        x_upper_bound = filtered_regions["centroid_x"].quantile(0.95)
+        y_lower_bound = filtered_regions["centroid_y"].quantile(0.05)
+        y_upper_bound = filtered_regions["centroid_y"].quantile(0.95)
+        filtered_regions = filtered_regions.query(
+            f"centroid_x >= {x_lower_bound} and centroid_x <= {x_upper_bound} and centroid_y >= {y_lower_bound} and centroid_y <= {y_upper_bound}"
+        ).copy()
+    else:
+        pass
 
     return filtered_regions
 
@@ -353,8 +377,7 @@ def rotate_grid(
                 slope, intercept = np.polyfit(
                     row_data["centroid_x"].tolist(),
                     row_data["centroid_y"].tolist(),
-                    1,
-                    rcond=None
+                    1
                 )
                 slopes[row] = slope
             except:
@@ -862,12 +885,12 @@ if __name__ == "__main__":
 # %% =========================== Manual Run ================================
 
 tetrad_image_paths={
-    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/3d/66_isu1_3d_#2_202411.cropped.png"),
-    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/4d/66_isu1_4d_#2_202411.cropped.png"),
-    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/5d/66_isu1_5d_#2_202411.cropped.png"),
-    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/6d/66_isu1_6d_#2_202411.cropped.png")
+    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/3d/88_rpl1801_3d_#3_202411.cropped.png"),
+    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/4d/88_rpl1801_4d_#3_202411.cropped.png"),
+    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/5d/88_rpl1801_5d_#3_202411.cropped.png"),
+    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/6d/88_rpl1801_6d_#3_202411.cropped.png")
 }
-marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/3rd_round/replica/66_isu1_HYG_#2_202411.cropped.png")
+marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/replica/88_rpl1801_HYG_#3_202411.cropped.png")
 
 config = Configuration(
     tetrad_image_paths=tetrad_image_paths,
