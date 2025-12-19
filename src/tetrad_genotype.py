@@ -16,8 +16,9 @@ import cv2
 # scikit-image - Image processing toolkit
 from skimage import io, measure, morphology #,filters
 from skimage.segmentation import watershed
-from skimage.feature import peak_local_max
-from skimage.filters import gaussian, threshold_otsu
+from skimage.feature import peak_local_max, canny
+from skimage.filters import gaussian, threshold_otsu, sobel, scharr
+from skimage.exposure import equalize_adapthist
 
 # scipy - Distance calculation and optimization
 # from scipy.spatial import distance
@@ -79,8 +80,10 @@ class Configuration:
     # tetrad plate
     tetrad_gray_method: str = "mean"
     tetrad_gaussian_sigma: float = 0.1 # smaller sigma for sharper colonies, larger sigma for smoother colonies
-    tetrad_min_area: int = 1 # minimum area of colonies to be detected
+    tetrad_min_area: int = 4 # minimum area of colonies to be detected
     tetrad_max_area: int = 2000 # maximum area of colonies to be detected
+    tetrad_circularity_threshold: float = 0.75
+    tetrad_solidity_threshold: float = 0.9
 
     # marker plate
     hyg_gray_channel: int = 0
@@ -88,10 +91,10 @@ class Configuration:
     hyg_min_area: int = 40 # larger minimum area for marker colonies
     hyg_max_area: int = 7000 # larger maximum area for marker colonies
     hyg_segmentation_min_distance: int = 10
+    hyg_circularity_threshold: float = 0.6
+    hyg_solidity_threshold: float = 0.85
 
-    # common settings
     morphology_disk_size: int = 3
-    morphology_operation: str = "open"  # Options: "open", "close", "dilate", "erode"
 
     # Alignment parameters
     max_match_distance_ratio: float = 0.2  # Relative to image size
@@ -127,9 +130,43 @@ def convert_to_grayscale(image: np.ndarray, method: str = 'mean', channel: int |
         raise ValueError("Invalid image shape.")
 
 @logger.catch
+def remove_background(
+    gray_image: np.ndarray,
+    threshold_percentile: float = 25
+) -> np.ndarray:
+    """Remove background from the image using the given threshold percentile."""
+    threshold_value = np.percentile(gray_image[gray_image > 0], threshold_percentile)
+    bg_removed = gray_image - threshold_value
+    bg_removed = np.clip(bg_removed, 0, 255).astype(np.uint8)
+    return bg_removed
+
+@logger.catch
 def apply_gaussian_blur(image: np.ndarray, sigma: float = 1.0) -> np.ndarray:
     """Apply Gaussian blur to an image."""
     return gaussian(image, sigma=sigma, preserve_range=True).astype(image.dtype)
+
+@logger.catch
+def binarize_image(
+    image: np.ndarray,
+    gray_method: str = "mean",
+    sigma: float = 1.0,
+    threshold: int | None = None
+) -> np.ndarray:
+    """Binarize an image using Otsu's thresholding and morphological operations."""
+    image = convert_to_grayscale(image, method=gray_method)    
+    bg_removed = remove_background(image, threshold_percentile=25)
+    # Apply Gaussian blur
+    blur = apply_gaussian_blur(bg_removed, sigma=sigma)
+
+    # Direct thresholding if threshold is provided
+    if threshold is not None:
+        binary = blur > threshold
+    else:
+        # Use Otsu's method to determine threshold
+        thresh = threshold_otsu(blur)
+        binary = blur > thresh
+
+    return binary
 
 @logger.catch
 def apply_morphology(binary_image: np.ndarray, disk_size: int = 3, operation: str = "open") -> np.ndarray:
@@ -145,48 +182,6 @@ def apply_morphology(binary_image: np.ndarray, disk_size: int = 3, operation: st
         morphed = morphology.binary_erosion(binary_image, selem)
     else:
         raise ValueError("Invalid morphological operation.")
-    return morphed
-
-@logger.catch
-def binarize_image(
-    image: np.ndarray,
-    gray_method: str = "mean",
-    channel: int | None = None,
-    sigma: float = 1.0,
-    threshold: int | None = None,
-    disk_size: int = 3,
-    operation: str = "open",
-    image_notes: tuple | None = None
-) -> np.ndarray:
-    """Binarize an image using Otsu's thresholding and morphological operations."""
-    if channel is None:
-        image = convert_to_grayscale(image, method=gray_method)
-    else:
-        image = convert_to_grayscale(image, channel=channel)
-    
-    # Apply Gaussian blur
-    blur = apply_gaussian_blur(image, sigma=sigma)
-    
-    # Direct thresholding if threshold is provided
-    if threshold is not None:
-        binary = blur > threshold
-    else:
-        # Use Otsu's method to determine threshold
-        thresh = threshold_otsu(blur)
-        binary = blur > thresh
-
-    signal_pixels_ratio = np.sum(binary) / binary.size
-    if (signal_pixels_ratio < 0.05 or signal_pixels_ratio > 0.9) and channel is not None:
-        threshold = np.percentile(blur, 85)
-        logger.warning(f"**** {' '.join(map(str, image_notes)) if image_notes else ''}: Unusual signal pixel ratio: {signal_pixels_ratio:.4f}. Using 85th percentile threshold: {threshold:.2f}")
-        binary = blur > threshold
-
-    if channel is None:
-        morphed = binary
-    else:
-        # Apply morphological operations
-        morphed = apply_morphology(binary, disk_size=disk_size, operation=operation)
-
     return morphed
 
 def watershed_segmentation(
@@ -211,29 +206,26 @@ def watershed_segmentation(
     
     # Apply watershed
     labels = watershed(-distance, markers, mask=binary_image)
-    
+
     return labels
 
 @logger.catch
 def detect_colonies(
     binary_image: np.ndarray,
-    min_area: int = 4,
-    max_area: int = 2000,
-    is_marker: bool = False,
     segmentation: bool = False,
     min_distance: int = 20
 ) -> pd.DataFrame:
     """Detect colonies in a binary image and return their properties."""
     if segmentation:
-        watershed_labels = watershed_segmentation(binary_image, min_distance=min_distance)
-        labeled_image = watershed_labels
+        labeled_image = watershed_segmentation(binary_image, min_distance=min_distance)
     else:
         labeled_image = measure.label(binary_image)
-    region_properties_table = pd.DataFrame(measure.regionprops_table(labeled_image, properties=("label","area", "centroid", "eccentricity")))
-    filtered_regions = region_properties_table.query(f"area >= {min_area} and area <= {max_area}").copy()
-
+    region_properties_table = pd.DataFrame(measure.regionprops_table(labeled_image, properties=("label","area", "area_convex", "centroid", "eccentricity", "perimeter")))
+    region_properties_table["radius"] = np.sqrt(region_properties_table["area"] / np.pi)
+    region_properties_table["circularity"] = 4 * np.pi * region_properties_table["area"] / (region_properties_table["perimeter"] ** 2 + 1e-2)
+    region_properties_table["solidity"] = region_properties_table["area"] / (region_properties_table["area_convex"] + 1e-2)
     # centroid calculation, note the order of centroid-1 and centroid-0 for x and y
-    filtered_regions.rename(
+    region_properties_table.rename(
         columns={
             "centroid-1": "centroid_x",
             "centroid-0": "centroid_y"
@@ -241,33 +233,68 @@ def detect_colonies(
         inplace=True
     )
 
-    # eccentricity filter and position filter for tetrad colonies
+    return region_properties_table
+
+@logger.catch
+def filter_colonies(
+    colony_regions: pd.DataFrame,
+    config: Configuration,
+    binary_image: np.ndarray,
+    is_marker: bool = False
+) -> pd.DataFrame:
     if is_marker:
-        pass
+        min_area = config.hyg_min_area
+        max_area = config.hyg_max_area
+        circularity_threshold = config.hyg_circularity_threshold
+        solidity_threshold = config.hyg_solidity_threshold
     else:
-        # use the colonies above 25th percentile area to determine the tetrad grid boundary
-        area_25th_percentile = filtered_regions["area"].quantile(0.25)
-        large_colonies = filtered_regions.query(f"area >= {area_25th_percentile}").copy()
-        x_min, x_max = large_colonies["centroid_x"].min(), large_colonies["centroid_x"].max()
-        y_min, y_max = large_colonies["centroid_y"].min(), large_colonies["centroid_y"].max()
+        min_area = config.tetrad_min_area
+        max_area = config.tetrad_max_area
+        circularity_threshold = config.tetrad_circularity_threshold
+        solidity_threshold = config.tetrad_solidity_threshold
+    
+    filtered_regions = colony_regions.query(
+        f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
+    ).copy()
+    
+    # eccentricity filter and position filter for tetrad colonies
+    # if is_marker:
+    #     pass
+    # else:
+    #     # use the colonies above 30th percentile area to determine the tetrad grid boundary
+    #     if filtered_regions.shape[0] > 36:
+    #         area_median = filtered_regions["area"].median()
+    #         large_colonies = filtered_regions.query(f"area >= {area_median}").copy()
+    #     elif filtered_regions.shape[0] > 30:
+    #         area_30th_percentile = filtered_regions["area"].quantile(0.3)
+    #         large_colonies = filtered_regions.query(f"area >= {area_30th_percentile}").copy()
+    #     elif filtered_regions.shape[0] > 25:
+    #         area_25th_percentile = filtered_regions["area"].quantile(0.25)
+    #         large_colonies = filtered_regions.query(f"area >= {area_25th_percentile}").copy()
+    #     elif filtered_regions.shape[0] > 15:
+    #         area_10th_percentile = filtered_regions["area"].quantile(0.1)
+    #         large_colonies = filtered_regions.query(f"area >= {area_10th_percentile}").copy()
+    #     else:
+    #         large_colonies = filtered_regions.copy()
+    #     x_min, x_max = large_colonies["centroid_x"].min(), large_colonies["centroid_x"].max()
+    #     y_min, y_max = large_colonies["centroid_y"].min(), large_colonies["centroid_y"].max()
 
-        h, w = binary_image.shape
-        tetrad_x_min = max(0, x_min - 30)
-        tetrad_x_max = min(w, x_max + 30)
-        tetrad_y_min = max(0, y_min - 30)
-        tetrad_y_max = min(h, y_max + 30)
+    #     h, w = binary_image.shape
+    #     tetrad_x_min = max(0, x_min - 30)
+    #     tetrad_x_max = min(w, x_max + 30)
+    #     tetrad_y_min = max(0, y_min - 30)
+    #     tetrad_y_max = min(h, y_max + 30)
 
-        filtered_regions = filtered_regions.query(
-            f"centroid_x >= {tetrad_x_min} and centroid_x <= {tetrad_x_max} and centroid_y >= {tetrad_y_min} and centroid_y <= {tetrad_y_max}"
-        ).copy()
-        filtered_regions = filtered_regions.query("eccentricity <= 0.6").copy()
+    #     filtered_regions = filtered_regions.query(
+    #         f"centroid_x >= {tetrad_x_min} and centroid_x <= {tetrad_x_max} and centroid_y >= {tetrad_y_min} and centroid_y <= {tetrad_y_max}"
+    #     ).copy()
 
     if filtered_regions.shape[0] > 48:
         # filter the colonies with extreme positions
-        x_lower_bound = filtered_regions["centroid_x"].quantile(0.05)
-        x_upper_bound = filtered_regions["centroid_x"].quantile(0.95)
-        y_lower_bound = filtered_regions["centroid_y"].quantile(0.05)
-        y_upper_bound = filtered_regions["centroid_y"].quantile(0.95)
+        x_lower_bound = filtered_regions["centroid_x"].quantile(0.025)
+        x_upper_bound = filtered_regions["centroid_x"].quantile(0.975)
+        y_lower_bound = filtered_regions["centroid_y"].quantile(0.025)
+        y_upper_bound = filtered_regions["centroid_y"].quantile(0.975)
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {x_lower_bound} and centroid_x <= {x_upper_bound} and centroid_y >= {y_lower_bound} and centroid_y <= {y_upper_bound}"
         ).copy()
@@ -311,17 +338,19 @@ def colony_grid_fitting(
     filtered_y_diffs = y_diff[(y_diff > 30) & (y_diff < 70)]
 
     if filtered_x_diffs.size == 0:
-        filtered_x_diffs = x_diff[(x_diff > 60) & (x_diff < 140)]
+        filtered_x_diffs = x_diff[(x_diff > 55) & (x_diff < 135)]
         filtered_x_diffs = filtered_x_diffs / 2
     if filtered_y_diffs.size == 0:
-        filtered_y_diffs = y_diff[(y_diff > 60) & (y_diff < 140)]
+        filtered_y_diffs = y_diff[(y_diff > 55) & (y_diff < 135)]
         filtered_y_diffs = filtered_y_diffs / 2
     x_spacing = np.mean(filtered_x_diffs)
     y_spacing = np.mean(filtered_y_diffs)
     # Use median of smallest values for robust min calculation
-    # x_min = np.median(np.sort(centroids[:, 0])[:3])
     x_min = centroids[:, 0].min()
-    y_min = np.median(np.sort(centroids[:, 1])[:5])
+    if len(centroids) > 18:
+        y_min = np.median(np.sort(centroids[:, 1])[:3])
+    else:
+        y_min = centroids[:, 1].min()
 
     fitted_grid = np.zeros((expected_rows, expected_cols, 2))
     for row in range(expected_rows):
@@ -362,7 +391,7 @@ def colony_grid_fitting(
 def rotate_grid(
     grid: np.ndarray,
     colony_regions: pd.DataFrame
-):
+) -> tuple[np.ndarray, float, int, int, float]:
     """Rotate the grid to best fit the centroids."""
     # find the best fitted colony
     best_fit = colony_regions.loc[colony_regions["distance"].idxmin()]
@@ -372,6 +401,8 @@ def rotate_grid(
     # calculate the best rotation angle
     slopes = {}
     for row, row_data in colony_regions.groupby("row"):
+        if row_data.shape[0] < 2:
+            continue
         with np.errstate(invalid='ignore'):
             try:
                 slope, intercept = np.polyfit(
@@ -383,9 +414,16 @@ def rotate_grid(
             except:
                 # Skip rows with poorly conditioned data
                 continue
-
-    mean_slope = np.mean(list(slopes.values()))
-    rotation_angle = np.degrees(np.arctan(mean_slope))
+    if not slopes:
+        use_slope = 0.0
+    else:
+        mean_slope = np.mean(list(slopes.values()))
+        median_slope = np.median(list(slopes.values()))
+        if abs(mean_slope - median_slope) > 0.1:
+            use_slope = median_slope
+        else:
+            use_slope = mean_slope
+    rotation_angle = np.degrees(np.arctan(use_slope))
 
     # Rotate the grid
     theta = np.radians(rotation_angle)
@@ -396,7 +434,7 @@ def rotate_grid(
     rotated_pts[:, :, 1] = pts_centered[:, :, 0] * sin_theta + pts_centered[:, :, 1] * cos_theta
     rotated_grid = rotated_pts + np.array(rotation_center)
 
-    return rotated_grid, rotation_angle, best_fitted_row, best_fitted_col
+    return rotated_grid, rotation_angle, best_fitted_row, best_fitted_col, use_slope
 
 @logger.catch
 def optimize_zoom_factor(
@@ -453,11 +491,12 @@ def zoom_rotated_grid(
     colony_regions: pd.DataFrame,
     best_rotated_row: int | None = None,
     best_rotated_col: int | None = None,
-    zoom_range: tuple[float, float] = (0.9, 1.1),
+    zoom_range: tuple[float, float] = (0.975, 1.025),
     zoom_step: float = 0.002,
     x_spacing_ref : float | None = None,
     y_spacing_ref : float | None = None,
-    spacing_tolerance: float | None = None
+    spacing_tolerance: float | None = None,
+    use_slope: float = 0
 ) -> tuple[np.ndarray, pd.DataFrame, tuple[float, float]]:
     """Zoom the rotated grid to best fit the centroids."""
     # Find the best fitted colony if not provided
@@ -466,14 +505,21 @@ def zoom_rotated_grid(
         best_rotated_row, best_rotated_col = int(best_fit["row"]), int(best_fit["col"])
     
     # Pre-extract data as numpy arrays for vectorized operations
-    rows = colony_regions["row"].to_numpy().astype(int)
-    cols = colony_regions["col"].to_numpy().astype(int)
-    centroids = colony_regions[["centroid_x", "centroid_y"]].to_numpy()
+    has_area_colony_region = colony_regions.dropna(subset=["area"]).copy()
+    rows = has_area_colony_region["row"].to_numpy().astype(int)
+    cols = has_area_colony_region["col"].to_numpy().astype(int)
+    centroids = has_area_colony_region[["centroid_x", "centroid_y"]].to_numpy()
     
     # Pre-compute grid centered
     grid_center_point = rotated_grid[best_rotated_row, best_rotated_col]
     grid_centered = rotated_grid - grid_center_point
     
+    # use slope to adjust zoom range if slope is significant
+    adjusted_zoom_range = (
+        zoom_range[0] - abs(use_slope)*1.5,
+        zoom_range[1] + abs(use_slope)*1.5
+    )
+
     # Find optimal zoom factor
     best_zoom = optimize_zoom_factor(
         grid_centered,
@@ -481,7 +527,7 @@ def zoom_rotated_grid(
         rows,
         cols,
         centroids,
-        zoom_range,
+        adjusted_zoom_range,
         zoom_step,
         x_spacing_ref,
         y_spacing_ref,
@@ -520,7 +566,7 @@ def grid_fitting_and_optimization(
         expected_rows,
         expected_cols
     )
-    rotated_grid, rotation_angle, best_row, best_col = rotate_grid(
+    rotated_grid, rotation_angle, best_row, best_col, use_slope = rotate_grid(
         fitted_grid,
         colony_regions
     )
@@ -528,7 +574,8 @@ def grid_fitting_and_optimization(
         rotated_grid,
         colony_regions,
         best_row,
-        best_col
+        best_col,
+        use_slope = use_slope
     )
     return (
         colony_regions,
@@ -551,22 +598,25 @@ def colony_grid_table(
     binary_image = binarize_image(
         image,
         gray_method=config.tetrad_gray_method,
-        sigma=config.tetrad_gaussian_sigma,
-        disk_size=config.morphology_disk_size,
-        operation=config.morphology_operation,
-        image_notes=image_notes
+        sigma=config.tetrad_gaussian_sigma
     )
 
     # Detect colonies
     detected_regions = detect_colonies(
+        binary_image
+    )
+
+    # Filter colonies
+    filtered_regions = filter_colonies(
+        detected_regions,
+        config,
         binary_image,
-        min_area=config.tetrad_min_area,
-        max_area=config.tetrad_max_area
+        is_marker=False
     )
 
     # Grid fitting and optimization
     colony_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
-        detected_regions,
+        filtered_regions,
         expected_rows=config.expected_rows,
         expected_cols=config.expected_cols,
         x_spacing_ref=config.average_x_spacing,
@@ -585,11 +635,25 @@ def marker_plate_point_matching(
 ) -> tuple[np.ndarray | None, pd.DataFrame, float, float, float, float, list[np.ndarray], list[np.ndarray]]:
     """Match marker points to plate points using the Hungarian algorithm."""
     # Detect marker colonies
-    marker_binary = binarize_image(marker_plate_image, channel=config.hyg_gray_channel, sigma=config.hyg_gaussian_sigma)
-    marker_morphed = apply_morphology(marker_binary, disk_size=config.morphology_disk_size, operation=config.morphology_operation)
-    # marker segmentation can be added here
-    # watershed_labels = watershed_segmentation(marker_morphed, min_distance=20)
-    marker_regions = detect_colonies(marker_morphed, min_area=config.hyg_min_area, max_area=config.hyg_max_area, is_marker=True, segmentation=True, min_distance=config.hyg_segmentation_min_distance)
+    gray = convert_to_grayscale(marker_plate_image, channel=config.hyg_gray_channel)
+    bg_removed = remove_background(gray, threshold_percentile=30)
+    blur = gaussian(bg_removed, sigma=2)
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    blur_clahe = equalize_adapthist(blur, clip_limit=0.01)
+    blur = (blur_clahe * 255).astype(np.uint8)
+    marker_binary = blur > max(threshold_otsu(blur[blur < 100]), 30)
+    marker_dilate = apply_morphology(marker_binary, disk_size=3, operation="dilate")
+    marker_fill = ndimage.binary_fill_holes(marker_dilate)
+    if marker_fill is None:
+        marker_fill = marker_dilate
+    marker_erode = apply_morphology(marker_fill, disk_size=3, operation="erode")
+    marker_regions = detect_colonies(marker_erode, segmentation=True, min_distance=config.hyg_segmentation_min_distance)
+    marker_regions = filter_colonies(
+        marker_regions,
+        config,
+        marker_binary,
+        is_marker=True
+    )
     marker_centroids = marker_regions[["centroid_x", "centroid_y"]].to_numpy()
     tetrad_centroids = colony_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
     tetrad_centroids_indices = colony_regions[["centroid_x", "centroid_y"]].dropna().index
@@ -884,6 +948,14 @@ if __name__ == "__main__":
 
 # %% =========================== Manual Run ================================
 
+# tetrad_image_paths={
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/3d/99_any1_3d_#3_202411.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/4d/99_any1_4d_#3_202411.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/5d/99_any1_5d_#3_202411.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/6d/99_any1_6d_#3_202411.cropped.png")
+# }
+# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
+
 tetrad_image_paths={
     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/3d/88_rpl1801_3d_#3_202411.cropped.png"),
     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/4d/88_rpl1801_4d_#3_202411.cropped.png"),
@@ -942,4 +1014,5 @@ all_colony_regions = pd.concat(
     axis=1
 ).sort_index(level=[1,0], axis=0)
 fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+
 # %%
