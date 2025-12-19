@@ -7,3 +7,4 @@ opencv-python
 scikit-image
 matplotlib
 seaborn
+scikit-learn
