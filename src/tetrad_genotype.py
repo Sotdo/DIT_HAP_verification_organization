@@ -325,12 +325,16 @@ class RobustOffsetGridRestorer:
                     best_window_count = count
                     grid_start_x, grid_start_y = ix_start, iy_start
                     
+        # Create grid: cols go left-to-right (x), rows go top-to-bottom (y)
+        # Using indexing='xy' to ensure first dimension is x (cols), second is y (rows)
         xx, yy = np.meshgrid(
             np.arange(self.cols) + grid_start_x, 
-            np.arange(self.rows) + grid_start_y
+            np.arange(self.rows) + grid_start_y,
+            indexing='xy'
         )
-        grid_phys_x = xx.ravel() * f_sx + f_ox
-        grid_phys_y = yy.ravel() * f_sy + f_oy
+        # Ravel in 'C' order: row-major, so we go through cols first (left-to-right), then rows (top-to-bottom)
+        grid_phys_x = xx.ravel('C') * f_sx + f_ox
+        grid_phys_y = yy.ravel('C') * f_sy + f_oy
         grid_aligned = np.column_stack((grid_phys_x, grid_phys_y))
         
         c_inv, s_inv = np.cos(r_angle), np.sin(r_angle)
@@ -346,6 +350,8 @@ class RobustOffsetGridRestorer:
         threshold = max(f_sx, f_sy) * 0.5
         
         # Assign row and col for each point
+        # Grid is arranged as [row0_col0, row0_col1, ..., row0_col(n-1), row1_col0, ...]
+        # So: row = idx // cols, col = idx % cols
         rows = nearest_grid_idx // self.cols
         cols = nearest_grid_idx % self.cols
         
