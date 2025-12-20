@@ -326,10 +326,11 @@ class RobustOffsetGridRestorer:
                     grid_start_x, grid_start_y = ix_start, iy_start
                     
         # Create grid: cols go left-to-right (x), rows go top-to-bottom (y)
+        # Reverse the ranges to change from bottom-to-top/right-to-left to top-to-bottom/left-to-right
         # Using indexing='xy' to ensure first dimension is x (cols), second is y (rows)
         xx, yy = np.meshgrid(
-            np.arange(self.cols) + grid_start_x, 
-            np.arange(self.rows) + grid_start_y,
+            np.arange(self.cols - 1, -1, -1) + grid_start_x,  # Reverse cols: right to left in physical space
+            np.arange(self.rows - 1, -1, -1) + grid_start_y,  # Reverse rows: bottom to top in physical space
             indexing='xy'
         )
         # Ravel in 'C' order: row-major, so we go through cols first (left-to-right), then rows (top-to-bottom)
