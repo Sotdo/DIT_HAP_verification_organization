@@ -769,6 +769,7 @@ def filter_colonies(
     
     filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
 
+
     if filtered_regions.empty or restored_grid.empty:
         logger.warning("*** Grid restoration failed: No colonies detected or grid fitting failed. Filter colonies at the boundaries and try again.")
         left, right = w * 0.01, w * 0.99
@@ -778,9 +779,9 @@ def filter_colonies(
         ).copy()
         filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
     else:
-        
-        restored_grid_left, restored_grid_top = restored_grid["expected_x"].min(), restored_grid["expected_y"].min()
-        restored_grid_right, restored_grid_bottom = restored_grid["expected_x"].max(), restored_grid["expected_y"].max()
+        grid_spacing = np.median(np.sqrt(np.diff(restored_grid["expected_x"])**2 + np.diff(restored_grid["expected_y"])**2))
+        restored_grid_left, restored_grid_top = restored_grid["expected_x"].min()-10, restored_grid["expected_y"].min()-10
+        restored_grid_right, restored_grid_bottom = restored_grid["expected_x"].max()+10, restored_grid["expected_y"].max()+10
 
         if restored_grid_left < -20 or restored_grid_top < -20 or restored_grid_right > w + 20 or restored_grid_bottom > h + 20:
             logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
