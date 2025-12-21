@@ -110,271 +110,225 @@ class Configuration:
     signal_detection_radius: int = 15
 
 # ========================== Grid Restoration =============================
-class RobustOffsetGridRestorer:
-    def __init__(self, target_rows=4, target_cols=12):
-        self.rows = target_rows
-        self.cols = target_cols
-
-    def _calculate_phase_offset(self, values, spacing):
-        """Calculate initial offset using complex average method"""
-        angles = (values / spacing) * 2 * np.pi
-        mean_vector = np.mean(np.exp(1j * angles))
-        phase = np.angle(mean_vector) / (2 * np.pi) * spacing
-        if phase < 0: phase += spacing
-        return phase
-
-    def _robust_fit_1d(self, indices, coords, rough_spacing):
-        """
-        Core improvement: Robust regression + median offset correction
-        """
-        # 1. Initial regression to obtain baseline
-        reg = LinearRegression().fit(indices.reshape(-1, 1), coords)
-        s_init = reg.coef_[0]
-        o_init = reg.intercept_
+def solve_grid_dataframe(df, approx_spacing, match_tolerance=0.25, img_coords=True):
+    """
+    Input:
+        df: DataFrame containing 'centroid_x', 'centroid_y'
+        approx_spacing: approximate spacing between points
+        img_coords: True for image coordinate system (Y increases downward, small Y is top);
+                    False for mathematical coordinate system (Y increases upward, large Y is top)
+    
+    Output:
+        tagged_df: Original DataFrame with row, col labels
+        ideal_grid: 48 perfect grid point coordinates (order: R0C0, R0C1... R3C11)
+    """
+    points = df[['centroid_x', 'centroid_y']].values
+    n_points = len(points)
+    
+    # ---------------- 1. RANSAC to find basis (invariant) ----------------
+    best_score = -1
+    best_model = None 
+    best_indices = []
+    
+    # Number of iterations
+    iterations = 2000 if n_points > 10 else 100
+    
+    for _ in range(iterations):
+        if n_points < 2: break
+        idx_a, idx_b = np.random.choice(n_points, 2, replace=False)
+        vec = points[idx_b] - points[idx_a]
+        dist = np.linalg.norm(vec)
         
-        # 2. Calculate residuals and remove small outliers (Outlier Pruning)
-        # Even after RANSAC, some points may deviate from center by 0.1 units, skewing the mean
-        expected = indices * s_init + o_init
-        residuals = np.abs(coords - expected)
-        
-        # Keep only the 80% of points with smallest residuals (discard inaccurate edge points)
-        # Alternatively, use absolute threshold, e.g., 5% of spacing
-        threshold = rough_spacing * 0.05
-        clean_mask = residuals < threshold
-        
-        # If too few points remain after pruning, relax the standard (Fallback)
-        if np.sum(clean_mask) < len(coords) * 0.5:
-            clean_mask = residuals < (rough_spacing * 0.15)
+        # Spacing filter
+        if abs(dist - approx_spacing) > approx_spacing * 0.25:
+            continue
             
-        clean_indices = indices[clean_mask]
-        clean_coords = coords[clean_mask]
+        u = vec
+        v = np.array([-u[1], u[0]]) # Perpendicular vector
+        basis = np.column_stack((u, v))
         
-        if len(clean_coords) < 2: return s_init, o_init  # Cannot optimize
-
-        # 3. Second regression: Calculate precise spacing
-        # Spacing is mainly determined by slope, LinearRegression typically estimates slope well
-        reg_final = LinearRegression().fit(clean_indices.reshape(-1, 1), clean_coords)
-        s_final = reg_final.coef_[0]
-        
-        # 4. Median-locked offset correction -- key to solving overall drift!
-        # Offset = Median(actual coordinate - spacing * index)
-        # Median can perfectly ignore the impact of one-sided errors
-        o_final = np.median(clean_coords - s_final * clean_indices)
-        
-        return s_final, o_final
-
-    def _refine_parameters(self, points, inlier_mask, rough_angle, rough_sx, rough_sy, rough_ox, rough_oy):
-        valid_pts = points[inlier_mask]
-        c, s = np.cos(-rough_angle), np.sin(-rough_angle)
-        R = np.array(((c, -s), (s, c)))
-        pts_rot = valid_pts.dot(R.T)
-        
-        # Determine indices
-        idx_x = np.round((pts_rot[:, 0] - rough_ox) / rough_sx)
-        idx_y = np.round((pts_rot[:, 1] - rough_oy) / rough_sy)
-        
-        # Perform robust optimization for X and Y axes separately
-        if len(np.unique(idx_x)) > 1:
-            refined_sx, refined_ox = self._robust_fit_1d(idx_x, pts_rot[:, 0], rough_sx)
-        else:
-            refined_sx, refined_ox = rough_sx, np.median(pts_rot[:, 0] - idx_x * rough_sx)
-
-        if len(np.unique(idx_y)) > 1:
-            refined_sy, refined_oy = self._robust_fit_1d(idx_y, pts_rot[:, 1], rough_sy)
-        else:
-            refined_sy, refined_oy = rough_sy, np.median(pts_rot[:, 1] - idx_y * rough_sy)
-            
-        return refined_sx, refined_sy, refined_ox, refined_oy, idx_x, idx_y
-
-    def fit_transform(self, data):
-        """
-        Fit and transform grid restoration.
-        
-        Parameters:
-        -----------
-        data : pandas.DataFrame or array-like
-            If DataFrame, must contain 'centroid_x' and 'centroid_y' columns.
-            If array-like, treated as (N, 2) coordinate array.
-            
-        Returns:
-        --------
-        result_df : pandas.DataFrame or None
-            DataFrame with original data plus 'row', 'col', 'grid_x', 'grid_y' columns.
-            Returns None if fitting fails.
-        restored_grid : numpy.ndarray
-            Sorted restored grid coordinates, shaped as (rows*cols, 2).
-        """
-        # Handle DataFrame input
-        is_dataframe = isinstance(data, pd.DataFrame)
-        if is_dataframe:
-            if 'centroid_x' not in data.columns or 'centroid_y' not in data.columns:
-                raise ValueError("DataFrame must contain 'centroid_x' and 'centroid_y' columns")
-            points = data[['centroid_x', 'centroid_y']].values
-            input_df = data.copy()
-        else:
-            points = np.array(data)
-            input_df = pd.DataFrame({'centroid_x': points[:, 0], 'centroid_y': points[:, 1]})
-            
-        n_pts = len(points)
-        if n_pts < 4:
-            if is_dataframe:
-                return None, None
-            return None, points
-
-        best_score = -1
-        best_rough_model = None
-        max_iter = 5000 
-        pairs = list(combinations(range(n_pts), 2))
-        if len(pairs) > max_iter:
-            indices = np.random.choice(len(pairs), max_iter, replace=False)
-            pairs = [pairs[i] for i in indices]
-
-        TOLERANCE_RATIO = 0.05 
-
-        for idx1, idx2 in pairs:
-            p1 = points[idx1]
-            p2 = points[idx2]
-            vec = p2 - p1
-            dist = np.linalg.norm(vec)
-            if dist < 0.5: continue 
-
-            for k in range(1, 8): 
-                spacing_x = dist / k
-                angle = np.arctan2(vec[1], vec[0])
-                
-                # Verify X
-                c, s = np.cos(-angle), np.sin(-angle)
-                R = np.array(((c, -s), (s, c)))
-                pts_rot = points.dot(R.T)
-                xs, ys = pts_rot[:, 0], pts_rot[:, 1]
-                
-                phase_x = self._calculate_phase_offset(xs, spacing_x)
-                x_indices = np.round((xs - phase_x) / spacing_x)
-                x_errors = np.abs(xs - (x_indices * spacing_x + phase_x))
-                x_inliers = x_errors < (spacing_x * TOLERANCE_RATIO)
-                
-                if np.sum(x_inliers) < max(3, n_pts * 0.15): continue
-
-                # Verify Y
-                valid_ys = ys[x_inliers]
-                if len(valid_ys) < 2: continue
-                sorted_ys = np.sort(valid_ys)
-                diffs = np.diff(sorted_ys)
-                valid_diffs = diffs[diffs > spacing_x * 0.2] 
-                if len(valid_diffs) == 0: continue
-                spacing_y = np.median(valid_diffs)
-                if not (0.2 < spacing_y / spacing_x < 5.0): continue
-
-                phase_y = self._calculate_phase_offset(valid_ys, spacing_y)
-                y_indices = np.round((ys - phase_y) / spacing_y)
-                y_errors = np.abs(ys - (y_indices * spacing_y + phase_y))
-                y_inliers = y_errors < (spacing_y * TOLERANCE_RATIO)
-                
-                # Span Constraint
-                total_inliers = np.logical_and(x_inliers, y_inliers)
-                score = np.sum(total_inliers)
-                
-                if score > 4: 
-                    curr_idx_x = x_indices[total_inliers]
-                    curr_idx_y = y_indices[total_inliers]
-                    span_x = curr_idx_x.max() - curr_idx_x.min() + 1
-                    span_y = curr_idx_y.max() - curr_idx_y.min() + 1
-                    
-                    if span_x > self.cols + 2 or span_y > self.rows + 2: continue 
-                    if abs(span_x - self.cols) <= 1 and abs(span_y - self.rows) <= 1: score += 5
-
-                if score > best_score:
-                    best_score = score
-                    best_rough_model = (angle, spacing_x, spacing_y, phase_x, phase_y, total_inliers)
-
-        if best_rough_model is None:
-            if is_dataframe:
-                return None, None
-            return None, points
-
-        # Refinement with Median Offset
-        r_angle, r_sx, r_sy, r_ox, r_oy, inliers_mask = best_rough_model
         try:
-            f_sx, f_sy, f_ox, f_oy, idx_x, idx_y = self._refine_parameters(
-                points, inliers_mask, r_angle, r_sx, r_sy, r_ox, r_oy
-            )
-        except Exception as e:
-             print(f"Refinement failed: {e}")
-             f_sx, f_sy, f_ox, f_oy = r_sx, r_sy, r_ox, r_oy
-             valid_pts = points[inliers_mask]
-             c, s = np.cos(-r_angle), np.sin(-r_angle)
-             R = np.array(((c, -s), (s, c)))
-             pts_rot = valid_pts.dot(R.T)
-             idx_x = np.round((pts_rot[:, 0] - f_ox) / f_sx)
-             idx_y = np.round((pts_rot[:, 1] - f_oy) / f_sy)
+            basis_inv = np.linalg.inv(basis)
+        except:
+            continue
+            
+        # Projection check
+        rel_pos = points - points[idx_a]
+        coords = rel_pos @ basis_inv.T
+        coords_round = np.round(coords)
+        diff = np.linalg.norm(coords - coords_round, axis=1)
+        
+        inliers_mask = diff < match_tolerance
+        score = np.sum(inliers_mask)
+        
+        if score > best_score:
+            best_score = score
+            best_model = (points[idx_a], basis_inv)
+            best_indices = np.where(inliers_mask)[0]
+            if score > min(48, n_points * 0.9): break
 
-        # Window Scanning
-        min_ix, max_ix = idx_x.min(), idx_x.max()
-        min_iy, max_iy = idx_y.min(), idx_y.max()
+    if best_model is None:
+        print("Error: Failed to detect grid structure")
+        return df, pd.DataFrame()
+
+    # ---------------- 2. Initial mapping and window search ----------------
+    origin, basis_inv = best_model
+    inlier_pts = points[best_indices]
+    
+    # Get original integer coordinates (may be unordered or rotated)
+    raw_uv = np.round((inlier_pts - origin) @ basis_inv.T).astype(int)
+    
+    # Find best 12x4 coverage
+    best_win_score = -1
+    best_orientation = None # 'normal' or 'transposed'
+    best_offset = (0, 0)
+    
+    # Search range
+    u_min, u_max = raw_uv[:,0].min(), raw_uv[:,0].max()
+    v_min, v_max = raw_uv[:,1].min(), raw_uv[:,1].max()
+    
+    # Brute-force search for best window
+    for u_start in range(u_min - 12, u_max + 1):
+        for v_start in range(v_min - 12, v_max + 1):
+            # Assume u=col, v=row (12x4)
+            mask_norm = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 12) & \
+                        (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 4)
+            score_norm = np.sum(mask_norm)
+            
+            if score_norm > best_win_score:
+                best_win_score = score_norm
+                best_orientation = 'normal'
+                best_offset = (u_start, v_start)
+                
+            # Assume u=row, v=col (4x12) - transposed case
+            mask_trans = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 4) & \
+                         (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 12)
+            score_trans = np.sum(mask_trans)
+            
+            if score_trans > best_win_score:
+                best_win_score = score_trans
+                best_orientation = 'transposed'
+                best_offset = (u_start, v_start)
+
+    # ---------------- 3. Build temporary logical coordinates ----------------
+    # At this step, we only have relative relationships, not which is up or down
+    temp_mapping = {} # idx -> [logic_c, logic_r]
+    u_start, v_start = best_offset
+    
+    # Select final inliers
+    if best_orientation == 'normal':
+        mask = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 12) & \
+               (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 4)
+        valid_indices = best_indices[mask]
+        valid_uv = raw_uv[mask]
+        for idx, (u, v) in zip(valid_indices, valid_uv):
+            temp_mapping[idx] = [u - u_start, v - v_start] # [0..11, 0..3]
+    else:
+        mask = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 4) & \
+               (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 12)
+        valid_indices = best_indices[mask]
+        valid_uv = raw_uv[mask]
+        for idx, (u, v) in zip(valid_indices, valid_uv):
+            temp_mapping[idx] = [v - v_start, u - u_start] # Transposed: v is col, u is row
+
+    # ---------------- 4. Key correction: physical ordering (top to bottom, left to right) ----------------
+    # We have 4 logical rows (0,1,2,3) and 12 logical columns (0..11)
+    # But whether logical row 0 is physically top or bottom depends on rotation and basis vector direction
+    
+    valid_phys_pts = points[valid_indices]
+    current_cols = np.array([temp_mapping[i][0] for i in valid_indices])
+    current_rows = np.array([temp_mapping[i][1] for i in valid_indices])
+    
+    # A. Correct row order
+    # Calculate the mean physical Y coordinate for each logical row
+    row_y_means = {}
+    for r in range(4):
+        mask_r = (current_rows == r)
+        if np.any(mask_r):
+            row_y_means[r] = np.mean(valid_phys_pts[mask_r, 1])
+        else:
+            row_y_means[r] = np.nan
+    
+    # Determine Y axis trend
+    # If img_coords=True (image coordinates), Row 0 should be Min Y
+    # Compare Y values of Row 0 and Row 3
+    if not np.isnan(row_y_means[0]) and not np.isnan(row_y_means[3]):
+        y0 = row_y_means[0]
+        y3 = row_y_means[3]
         
-        best_window_count = -1
-        grid_start_x, grid_start_y = min_ix, min_iy
+        should_flip_row = False
+        if img_coords: 
+            # Image mode: want Row0 < Row3 (top < bottom)
+            if y0 > y3: should_flip_row = True
+        else:
+            # Plotting mode: want Row0 > Row3 (top > bottom)
+            if y0 < y3: should_flip_row = True
         
-        for ix_start in range(int(min_ix) - 1, int(max_ix) + 2):
-            for iy_start in range(int(min_iy) - 1, int(max_iy) + 2):
-                count = np.sum(
-                    (idx_x >= ix_start) & (idx_x < ix_start + self.cols) & 
-                    (idx_y >= iy_start) & (idx_y < iy_start + self.rows)
-                )
-                if count > best_window_count:
-                    best_window_count = count
-                    grid_start_x, grid_start_y = ix_start, iy_start
-                    
-        # Create grid: cols go left-to-right (x), rows go top-to-bottom (y)
-        # Reverse the ranges to change from bottom-to-top/right-to-left to top-to-bottom/left-to-right
-        # Using indexing='xy' to ensure first dimension is x (cols), second is y (rows)
-        xx, yy = np.meshgrid(
-            np.arange(self.cols - 1, -1, -1) + grid_start_x,  # Reverse cols: right to left in physical space
-            np.arange(self.rows - 1, -1, -1) + grid_start_y,  # Reverse rows: bottom to top in physical space
-            indexing='xy'
-        )
-        # Ravel in 'C' order: row-major, so we go through cols first (left-to-right), then rows (top-to-bottom)
-        grid_phys_x = xx.ravel('C') * f_sx + f_ox
-        grid_phys_y = yy.ravel('C') * f_sy + f_oy
-        grid_aligned = np.column_stack((grid_phys_x, grid_phys_y))
+        if should_flip_row:
+            # Perform flip
+            for idx in valid_indices:
+                temp_mapping[idx][1] = 3 - temp_mapping[idx][1]
+
+    # B. Correct column order
+    # Col 0 should always be Min X (leftmost)
+    col_x_means = {}
+    for c in [0, 11]:
+        mask_c = (current_cols == c)
+        if np.any(mask_c):
+            col_x_means[c] = np.mean(valid_phys_pts[mask_c, 0])
+        else:
+            col_x_means[c] = np.nan
+            
+    if not np.isnan(col_x_means[0]) and not np.isnan(col_x_means[11]):
+        if col_x_means[0] > col_x_means[11]: # If Col 0's X is greater than Col 11
+            # Perform flip
+            for idx in valid_indices:
+                temp_mapping[idx][0] = 11 - temp_mapping[idx][0]
+
+    # ---------------- 5. Output assembly and secondary fitting ----------------
+    # Label DataFrame
+    df['row'] = np.nan
+    df['col'] = np.nan
+    
+    # Prepare data for fitting
+    A, b = [], []
+    for idx, (c, r) in temp_mapping.items():
+        # Write to df
+        df.at[df.index[idx], 'row'] = r
+        df.at[df.index[idx], 'col'] = c
         
-        c_inv, s_inv = np.cos(r_angle), np.sin(r_angle)
-        R_inv = np.array(((c_inv, -s_inv), (s_inv, c_inv)))
-        restored_grid = grid_aligned.dot(R_inv.T)
+        # Fitting equation
+        A.append([1, 0, c, 0, r, 0])
+        b.append(points[idx][0])
+        A.append([0, 1, 0, c, 0, r])
+        b.append(points[idx][1])
         
-        # Match input points to grid points
-        distances = cdist(points, restored_grid)
-        nearest_grid_idx = np.argmin(distances, axis=1)
-        min_distances = np.min(distances, axis=1)
+    # Calculate perfect grid parameters
+    A = np.array(A)
+    b = np.array(b)
+    # Use least squares to compute [Ox, Oy, Ux, Uy, Vx, Vy]
+    if len(A) > 0:
+        params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+        O_fit = params[0:2]
+        u_fit = params[2:4] # col vector
+        v_fit = params[4:6] # row vector
         
-        # Calculate threshold based on spacing
-        threshold = max(f_sx, f_sy) * 0.5
-        
-        # Assign row and col for each point
-        # Grid is arranged as [row0_col0, row0_col1, ..., row0_col(n-1), row1_col0, ...]
-        # So: row = idx // cols, col = idx % cols
-        rows = nearest_grid_idx // self.cols
-        cols = nearest_grid_idx % self.cols
-        
-        # Create result DataFrame
-        result_df = input_df.copy()
-        result_df['row'] = rows
-        result_df['col'] = cols
-        result_df['grid_x'] = restored_grid[nearest_grid_idx, 0]
-        result_df['grid_y'] = restored_grid[nearest_grid_idx, 1]
-        result_df['distance_to_grid'] = min_distances
-        
-        # Mark points that are too far from any grid point
-        result_df['matched'] = min_distances < threshold
-        
-        # Sort restored grid by row, then col
-        grid_order = np.arange(len(restored_grid))
-        grid_rows = grid_order // self.cols
-        grid_cols = grid_order % self.cols
-        sort_idx = np.lexsort((grid_cols, grid_rows))
-        restored_grid_sorted = restored_grid[sort_idx]
-        
-        return result_df, restored_grid_sorted
+        # Generate ideal grid (in order)
+        ideal_data = []
+        for r in range(4):
+            for c in range(12):
+                pt = O_fit + c * u_fit + r * v_fit
+                ideal_data.append({
+                    'row': r, 
+                    'col': c, 
+                    'expected_x': pt[0], 
+                    'expected_y': pt[1]
+                })
+        ideal_df = pd.DataFrame(ideal_data)
+    else:
+        ideal_df = pd.DataFrame()
+
+    return df, ideal_df
 
 # %% =========================== Functions =============================
 @logger.catch
@@ -526,14 +480,16 @@ def filter_colonies(
         f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
     ).copy()
     
-    restorer = RobustOffsetGridRestorer(target_rows=config.expected_rows, target_cols=config.expected_cols)
-    filtered_regions, restored_grid = restorer.fit_transform(filtered_regions)
+    filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
     filtered_regions.dropna(subset=["row", "col"], inplace=True)
     filtered_regions.set_index(["row", "col"], inplace=True, drop=True)
-    for col, col_colonies in enumerate(restored_grid):
-        for row, row_colony in enumerate(col_colonies):
-            filtered_regions.loc[(row, col), "grid_point_x"] = row_colony[0]
-            filtered_regions.loc[(row, col), "grid_point_y"] = row_colony[1]
+    for idx, point in restored_grid.iterrows():
+        row = point["row"]
+        col = point["col"]
+        grid_x = point["expected_x"]
+        grid_y = point["expected_y"]
+        filtered_regions.at[(row, col), "grid_point_x"] = grid_x
+        filtered_regions.at[(row, col), "grid_point_y"] = grid_y
 
     return filtered_regions
 
@@ -866,11 +822,11 @@ def marker_plate_point_matching(
     marker_plate_image: np.ndarray,
     config: Configuration,
     image_notes: tuple | None = None
-) -> tuple[np.ndarray | None, pd.DataFrame, float, float, float, float, list[np.ndarray], list[np.ndarray]]:
+) -> tuple[np.ndarray | None, pd.DataFrame, pd.DataFrame, float, float, float, float, list[np.ndarray], list[np.ndarray]]:
     """Match marker points to plate points using the Hungarian algorithm."""
     # Detect marker colonies
     gray = convert_to_grayscale(marker_plate_image, channel=config.hyg_gray_channel)
-    bg_removed = remove_background(gray, threshold_percentile=30)
+    bg_removed = remove_background(gray, threshold_percentile=40)
     blur = gaussian(bg_removed, sigma=2)
     # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
     blur_clahe = equalize_adapthist(blur, clip_limit=0.01)
@@ -931,7 +887,7 @@ def marker_plate_point_matching(
     angle = np.degrees(np.arctan2(M_estimate[1, 0], M_estimate[0, 0]))
     tx, ty = M_estimate[0, 2], M_estimate[1, 2]
 
-    return marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids
+    return marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids
 
 @logger.catch
 def genotyping(
@@ -988,12 +944,14 @@ def plot_genotype_results(
     tetrad_results: dict[int, dict],
     aligned_marker_image: np.ndarray,
     colony_regions: pd.DataFrame,
+    marker_plate_image: np.ndarray,
+    marker_regions: pd.DataFrame,
     radius: int = 15
 ):
     """Plot genotyping results with colony annotations."""
     n_days = len(tetrad_results)
     last_day = max(tetrad_results.keys())
-    n_cols = n_days + 1 + 2 + 1 # +1 for marker plate, +1 for colony area plot
+    n_cols = n_days + 1 + 2 + 1 + 1 # +1 for marker plate, +1 for colony area plot
 
     fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 4))
     for day_idx, (day, day_data) in enumerate(sorted(tetrad_results.items())):
@@ -1016,6 +974,14 @@ def plot_genotype_results(
             color = 'green' if genotype == "WT" else 'red'
             square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
             ax.add_patch(square)
+    
+    axes[-5].imshow(marker_plate_image, rasterized=True)
+    axes[-5].set_title("Original Marker Plate")
+    axes[-5].axis('off')
+    for idx, region in marker_regions.iterrows():
+        cx, cy = region["grid_point_x"], region["grid_point_y"]
+        square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor='blue', facecolor='none', linewidth=2, alpha=0.4)
+        axes[-5].add_patch(square)
 
     axes[-4].imshow(aligned_marker_image, rasterized=True)
     axes[-4].set_title("Aligned Marker Plate")
@@ -1104,7 +1070,7 @@ def genotyping_pipeline(
         raise ValueError("No tetrad images were processed.")
 
     marker_plate_image = io.imread(config.marker_image_path)
-    marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+    marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
         last_day_colony_regions,
         marker_plate_image,
         config,
@@ -1121,7 +1087,7 @@ def genotyping_pipeline(
         [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
         axis=1
     ).sort_index(level=[1,0], axis=0)
-    fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+    fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
     return all_colony_regions, fig
 # %% =========================== Debug Functions =============================
 def plot_detected_colonies(
@@ -1181,71 +1147,84 @@ if __name__ == "__main__":
 
 # %% =========================== Manual Run ================================
 
-tetrad_image_paths={
-    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/3d/99_any1_3d_#3_202411.cropped.png"),
-    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/4d/99_any1_4d_#3_202411.cropped.png"),
-    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/5d/99_any1_5d_#3_202411.cropped.png"),
-    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/6d/99_any1_6d_#3_202411.cropped.png")
-}
-marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
-
 # tetrad_image_paths={
-#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/3d/88_rpl1801_3d_#3_202411.cropped.png"),
-#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/4d/88_rpl1801_4d_#3_202411.cropped.png"),
-#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/5d/88_rpl1801_5d_#3_202411.cropped.png"),
-#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/6d/88_rpl1801_6d_#3_202411.cropped.png")
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/3d/99_any1_3d_#3_202411.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/4d/99_any1_4d_#3_202411.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/5d/99_any1_5d_#3_202411.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/6d/99_any1_6d_#3_202411.cropped.png")
 # }
-# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/replica/88_rpl1801_HYG_#3_202411.cropped.png")
+# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
 
-config = Configuration(
-    tetrad_image_paths=tetrad_image_paths,
-    marker_image_path=marker_image_path
-)
+# # tetrad_image_paths={
+# #     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/3d/88_rpl1801_3d_#3_202411.cropped.png"),
+# #     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/4d/88_rpl1801_4d_#3_202411.cropped.png"),
+# #     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/5d/88_rpl1801_5d_#3_202411.cropped.png"),
+# #     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/6d/88_rpl1801_6d_#3_202411.cropped.png")
+# # }
+# # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/replica/88_rpl1801_HYG_#3_202411.cropped.png")
 
-last_day = max(config.tetrad_image_paths.keys())
-day_colonies = {}
-last_day_binary = None
-last_day_colony_regions = None
+# config = Configuration(
+#     tetrad_image_paths=tetrad_image_paths,
+#     marker_image_path=marker_image_path
+# )
 
-# %%
-for day, day_image_path in config.tetrad_image_paths.items():
-    day_colonies[day] = {}
-    image = io.imread(day_image_path)
-    day_colonies[day]["image"] = image
-    day_colonies[day]["image_notes"] = (day_image_path.stem, day)
-    day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
-        image,
-        config,
-        day_colonies[day]["image_notes"]
-    )
-    if day == last_day and last_day_binary is None and last_day_colony_regions is None:
-        last_day_binary = day_colonies[day]["binary_image"]
-        last_day_colony_regions = day_colonies[day]["table"]
-    day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
+# last_day = max(config.tetrad_image_paths.keys())
+# day_colonies = {}
+# last_day_binary = None
+# last_day_colony_regions = None
 
-if last_day_binary is None or last_day_colony_regions is None:
-    raise ValueError("No tetrad images were processed.")
+# # %%
+# for day, day_image_path in config.tetrad_image_paths.items():
+#     day_colonies[day] = {}
+#     image = io.imread(day_image_path)
+#     day_colonies[day]["image"] = image
+#     day_colonies[day]["image_notes"] = (day_image_path.stem, day)
+#     day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
+#         image,
+#         config,
+#         day_colonies[day]["image_notes"]
+#     )
+#     if day == last_day and last_day_binary is None and last_day_colony_regions is None:
+#         last_day_binary = day_colonies[day]["binary_image"]
+#         last_day_colony_regions = day_colonies[day]["table"]
+#     day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
 
-# %%
-marker_plate_image = io.imread(config.marker_image_path)
-marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
-    last_day_colony_regions,
-    marker_plate_image,
-    config
-)
+# if last_day_binary is None or last_day_colony_regions is None:
+#     raise ValueError("No tetrad images were processed.")
 
-if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-    logger.error("Marker plate alignment failed. No aligned marker image available.")
-    marker_aligned = marker_plate_image
+# # %%
+# marker_plate_image = io.imread(config.marker_image_path)
+# marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+#     last_day_colony_regions,
+#     marker_plate_image,
+#     config
+# )
 
-marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-# %%
-genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
+# if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+#     logger.error("Marker plate alignment failed. No aligned marker image available.")
+#     marker_aligned = marker_plate_image
 
-all_colony_regions = pd.concat(
-    [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
-    axis=1
-).sort_index(level=[1,0], axis=0)
-fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+# marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+# # %%
+# genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
 
+# all_colony_regions = pd.concat(
+#     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
+#     axis=1
+# ).sort_index(level=[1,0], axis=0)
+# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+
+# # %%
+# image = io.imread(tetrad_image_paths[3])
+
+# binary_image = binarize_image(
+#         image,
+#         gray_method=config.tetrad_gray_method,
+#         sigma=config.tetrad_gaussian_sigma
+# )
+
+# # Detect colonies
+# detected_regions = detect_colonies(
+#     binary_image
+# )
 # %%
