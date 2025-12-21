@@ -110,7 +110,7 @@ class Configuration:
     signal_detection_radius: int = 15
 
 # ========================== Grid Restoration =============================
-def solve_grid_dataframe(df, approx_spacing, match_tolerance=0.25, img_coords=True):
+def solve_grid_dataframe(df, approx_spacing, match_tolerance=0.25, img_coords=True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Input:
         df: DataFrame containing 'centroid_x', 'centroid_y'
@@ -410,7 +410,7 @@ def apply_morphology(binary_image: np.ndarray, disk_size: int = 3, operation: st
 
 def watershed_segmentation(
     binary_image: np.ndarray,
-    min_distance: int = 20
+    min_distance: int = 15
 ) -> np.ndarray:
     """Apply watershed segmentation to separate touching colonies."""
     # Compute distance transform
@@ -437,7 +437,7 @@ def watershed_segmentation(
 def detect_colonies(
     binary_image: np.ndarray,
     segmentation: bool = False,
-    min_distance: int = 20
+    min_distance: int = 15
 ) -> pd.DataFrame:
     """Detect colonies in a binary image and return their properties."""
     if segmentation:
@@ -460,45 +460,11 @@ def detect_colonies(
     return region_properties_table
 
 @logger.catch
-def filter_colonies(
-    colony_regions: pd.DataFrame,
-    config: Configuration,
-    is_marker: bool = False
-) -> pd.DataFrame:
-    if is_marker:
-        min_area = config.hyg_min_area
-        max_area = config.hyg_max_area
-        circularity_threshold = config.hyg_circularity_threshold
-        solidity_threshold = config.hyg_solidity_threshold
-    else:
-        min_area = config.tetrad_min_area
-        max_area = config.tetrad_max_area
-        circularity_threshold = config.tetrad_circularity_threshold
-        solidity_threshold = config.tetrad_solidity_threshold
-    
-    filtered_regions = colony_regions.query(
-        f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
-    ).copy()
-    
-    filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
-    filtered_regions.dropna(subset=["row", "col"], inplace=True)
-    filtered_regions.set_index(["row", "col"], inplace=True, drop=True)
-    for idx, point in restored_grid.iterrows():
-        row = point["row"]
-        col = point["col"]
-        grid_x = point["expected_x"]
-        grid_y = point["expected_y"]
-        filtered_regions.at[(row, col), "grid_point_x"] = grid_x
-        filtered_regions.at[(row, col), "grid_point_y"] = grid_y
-
-    return filtered_regions
-
-@logger.catch
 def colony_grid_fitting(
     colony_regions: pd.DataFrame,
     expected_rows: int = 4,
     expected_cols: int = 12
-) -> tuple[np.ndarray, pd.DataFrame]:
+) -> tuple[pd.DataFrame, np.ndarray]:
     """Fit a grid to detected colony centroids."""
     # Grid Fitting Parameters
     # Extract centroids
@@ -575,7 +541,7 @@ def colony_grid_fitting(
         "distance <= 10"
     ).copy()
 
-    return fitted_grid, dedup_colony_regions
+    return dedup_colony_regions, fitted_grid
 
 @logger.catch
 def rotate_grid(
@@ -751,7 +717,7 @@ def grid_fitting_and_optimization(
     spacing_tolerance: float | None = None
 ) -> tuple[pd.DataFrame, np.ndarray, float, int, int, tuple[float, float]]:
     """Fit and optimize a colony grid to detected centroids."""
-    fitted_grid, colony_regions = colony_grid_fitting(
+    colony_regions, fitted_grid = colony_grid_fitting(
         colony_regions,
         expected_rows,
         expected_cols
@@ -777,6 +743,71 @@ def grid_fitting_and_optimization(
     )
 
 @logger.catch
+def filter_colonies(
+    binary_image: np.ndarray,
+    colony_regions: pd.DataFrame,
+    config: Configuration,
+    is_marker: bool = False
+) -> pd.DataFrame:
+    
+    h, w = binary_image.shape
+
+    if is_marker:
+        min_area = config.hyg_min_area
+        max_area = config.hyg_max_area
+        circularity_threshold = config.hyg_circularity_threshold
+        solidity_threshold = config.hyg_solidity_threshold
+    else:
+        min_area = config.tetrad_min_area
+        max_area = config.tetrad_max_area
+        circularity_threshold = config.tetrad_circularity_threshold
+        solidity_threshold = config.tetrad_solidity_threshold
+    
+    filtered_regions = colony_regions.query(
+        f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
+    ).copy()
+    
+    filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+
+    if filtered_regions.empty or restored_grid.empty:
+        logger.warning("*** Grid restoration failed: No colonies detected or grid fitting failed. Filter colonies at the boundaries and try again.")
+        left, right = w * 0.01, w * 0.99
+        top, bottom = h * 0.01, h * 0.99
+        filtered_regions = filtered_regions.query(
+            f"centroid_x >= {left} and centroid_x <= {right} and centroid_y >= {top} and centroid_y <= {bottom}"
+        ).copy()
+        filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+    else:
+        
+        restored_grid_left, restored_grid_top = restored_grid["expected_x"].min(), restored_grid["expected_y"].min()
+        restored_grid_right, restored_grid_bottom = restored_grid["expected_x"].max(), restored_grid["expected_y"].max()
+
+        if restored_grid_left < -20 or restored_grid_top < -20 or restored_grid_right > w + 20 or restored_grid_bottom > h + 20:
+            logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
+
+            filtered_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
+                filtered_regions,
+                expected_rows=config.expected_rows,
+                expected_cols=config.expected_cols,
+                x_spacing_ref=config.average_x_spacing,
+                y_spacing_ref=config.average_y_spacing,
+                spacing_tolerance=config.spacing_tolerance
+            )
+
+        else:
+            filtered_regions.dropna(subset=["row", "col"], inplace=True)
+            filtered_regions.set_index(["row", "col"], inplace=True, drop=True)
+            for idx, point in restored_grid.iterrows():
+                row = point["row"]
+                col = point["col"]
+                grid_x = point["expected_x"]
+                grid_y = point["expected_y"]
+                filtered_regions.at[(row, col), "grid_point_x"] = grid_x
+                filtered_regions.at[(row, col), "grid_point_y"] = grid_y
+            filtered_regions["area"] = filtered_regions["area"].fillna(0)
+    return filtered_regions
+
+@logger.catch
 def colony_grid_table(
     image: np.ndarray,
     config: Configuration,
@@ -798,20 +829,12 @@ def colony_grid_table(
 
     # Filter colonies
     filtered_regions = filter_colonies(
+        binary_image,
         detected_regions,
         config,
         is_marker=False
     )
 
-    # Grid fitting and optimization
-    # colony_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
-    #     filtered_regions,
-    #     expected_rows=config.expected_rows,
-    #     expected_cols=config.expected_cols,
-    #     x_spacing_ref=config.average_x_spacing,
-    #     y_spacing_ref=config.average_y_spacing,
-    #     spacing_tolerance=config.spacing_tolerance
-    # )
     grid = filtered_regions[["grid_point_x", "grid_point_y"]].to_numpy().reshape(config.expected_rows, config.expected_cols, 2)
 
     return binary_image, filtered_regions, grid
@@ -839,13 +862,17 @@ def marker_plate_point_matching(
     marker_erode = apply_morphology(marker_fill, disk_size=3, operation="erode")
     marker_regions = detect_colonies(marker_erode, segmentation=True, min_distance=config.hyg_segmentation_min_distance)
     marker_regions = filter_colonies(
+        marker_erode,
         marker_regions,
         config,
         is_marker=True
     )
-    marker_centroids = marker_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
-    tetrad_centroids = colony_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
-    tetrad_centroids_indices = colony_regions[["centroid_x", "centroid_y"]].dropna().index
+    # marker_centroids = marker_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
+    # tetrad_centroids = colony_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
+    # tetrad_centroids_indices = colony_regions[["centroid_x", "centroid_y"]].dropna().index
+    marker_centroids = marker_regions[["grid_point_x", "grid_point_y"]].dropna().to_numpy()
+    tetrad_centroids = colony_regions[["grid_point_x", "grid_point_y"]].dropna().to_numpy()
+    tetrad_centroids_indices = colony_regions[["grid_point_x", "grid_point_y"]].dropna().index
     
     if len(marker_centroids) == 0 or len(tetrad_centroids) == 0:
         logger.error(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: No centroids detected in marker or tetrad images for matching.")
