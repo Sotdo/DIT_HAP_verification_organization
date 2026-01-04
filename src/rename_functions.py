@@ -4,9 +4,12 @@ from pathlib import Path
 from tqdm import tqdm
 from shutil import copyfile
 from dataclasses import dataclass
+from loguru import logger
 
 sys.path.append(str(Path(__file__).parent))
 from utils import verificationMetadata, roundConfig
+
+
 
 # %% ------------------------------------ Dataclasses ------------------------------------ #
 @dataclass
@@ -30,6 +33,7 @@ class renameFormatConfig:
 
 
 # %% ------------------------------------ Functions ------------------------------------ #
+@logger.catch
 def rename_image_name(
     subfolder_name: str,
     input_folder_path: Path,
@@ -38,6 +42,7 @@ def rename_image_name(
 ):
     """Rename image files in the specified folder according to the defined format."""
     image_files = list(input_folder_path.glob("*"))
+    image_files = [f for f in image_files if f.is_file()]
     if subfolder_name != "replica":
         element_idx = {
             "date": 0,
@@ -77,6 +82,7 @@ def rename_image_name(
         new_file_path = output_folder_path / new_file_name
         copyfile(image_file, new_file_path)
 
+@logger.catch
 def rename_images_per_round(
     round: str,
     verification_metadata: verificationMetadata,
