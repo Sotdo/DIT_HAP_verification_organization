@@ -772,12 +772,23 @@ def filter_colonies(
 
     if filtered_regions.empty or restored_grid.empty:
         logger.warning("*** Grid restoration failed: No colonies detected or grid fitting failed. Filter colonies at the boundaries and try again.")
-        left, right = w * 0.01, w * 0.99
-        top, bottom = h * 0.01, h * 0.99
+        left, right = w * 0.015, w * 0.985
+        top, bottom = h * 0.015, h * 0.985
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {left} and centroid_x <= {right} and centroid_y >= {top} and centroid_y <= {bottom}"
         ).copy()
         filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+
+    if filtered_regions.empty or restored_grid.empty:
+        logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
+        filtered_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
+            filtered_regions,
+            expected_rows=config.expected_rows,
+            expected_cols=config.expected_cols,
+            x_spacing_ref=config.average_x_spacing,
+            y_spacing_ref=config.average_y_spacing,
+            spacing_tolerance=config.spacing_tolerance
+        )
     else:
         grid_spacing = np.median(np.sqrt(np.diff(restored_grid["expected_x"])**2 + np.diff(restored_grid["expected_y"])**2))
         restored_grid_left, restored_grid_top = restored_grid["expected_x"].min()-10, restored_grid["expected_y"].min()-10
@@ -798,13 +809,14 @@ def filter_colonies(
         else:
             filtered_regions.dropna(subset=["row", "col"], inplace=True)
             filtered_regions.set_index(["row", "col"], inplace=True, drop=True)
-            for idx, point in restored_grid.iterrows():
-                row = point["row"]
-                col = point["col"]
-                grid_x = point["expected_x"]
-                grid_y = point["expected_y"]
-                filtered_regions.at[(row, col), "grid_point_x"] = grid_x
-                filtered_regions.at[(row, col), "grid_point_y"] = grid_y
+            
+            # Use reindex to ensure all grid points are present and sorted
+            grid_df = restored_grid.set_index(["row", "col"])
+            filtered_regions = filtered_regions.reindex(grid_df.index)
+            
+            filtered_regions["grid_point_x"] = grid_df["expected_x"]
+            filtered_regions["grid_point_y"] = grid_df["expected_y"]
+            
             filtered_regions["area"] = filtered_regions["area"].fillna(0)
     return filtered_regions
 
@@ -1044,14 +1056,16 @@ def plot_genotype_results(
 
     # Colony area plot
     ax_area = axes[-1]
-    area_table = colony_regions.set_index("genotype", append=True).filter(like="area")
+    colony_regions = colony_regions.groupby("col").filter(lambda x: x.query("genotype == 'WT'").shape[0]/x.shape[0] == 0.5)
+    area_table = colony_regions.set_index("genotype", append=True).filter(like="area_day")
     area_table["area_day0"] = 0
     area_table = area_table.rename_axis("day", axis=1).stack().reset_index().rename(columns={0: "area"})
     area_table["day_num"] = area_table["day"].str.extract(r'day(\d+)').astype(int)
-    last_day_WT_colonies_area_mean = area_table.query("genotype == 'WT' and day_num == @last_day")["area"].mean()
+    # area_table = area_table.groupby(["col", "day"]).filter(lambda x: x.query("genotype == 'WT'").shape[0]/x.shape[0] == 0.5)
+    last_day_WT_colonies_area_mean = area_table.query("genotype == 'WT' and day_num == @last_day")["area"].median()
     area_table["area[normalized]"] = area_table["area"] / last_day_WT_colonies_area_mean
     area_table = area_table.query("genotype in ['WT', 'Deletion']")
-    sns.lineplot(x="day_num", y="area[normalized]", hue="genotype", data=area_table, ax=ax_area, palette={"WT": "green", "Deletion": "red"}, errorbar="se")
+    sns.lineplot(x="day_num", y="area[normalized]", hue="genotype", data=area_table, ax=ax_area, palette={"WT": "green", "Deletion": "red"}, errorbar=("pi", 50), estimator="median")
     WT_count = colony_regions.query("genotype == 'WT'")["genotype"].count()
     deletion_count = colony_regions.query("genotype == 'Deletion'")["genotype"].count()
     ax_area.set_title(f"Colony Area Over Time:\n WT ({WT_count}) vs Deletion ({deletion_count})")
