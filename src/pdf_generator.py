@@ -734,7 +734,7 @@ def create_verification_pdf(
 def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = None):
     """Generate PDFs for specified round or all rounds."""
     # Find verification table file
-    verification_file = config.table_structures_path / "all_rounds_verification_summary.xlsx"
+    verification_file = config.table_structures_path / "all_rounds_crop_summary.xlsx"
 
     if not verification_file.exists():
         logger.error(f"Verification table file not found: {verification_file}")
@@ -788,7 +788,7 @@ def generate_pdf_for_given_genes(
 ):
     """Generate PDFs for specified genes in a round."""
     # Find verification table file
-    verification_file = config.table_structures_path / "all_rounds_combined_verification_summary.xlsx"
+    verification_file = config.table_structures_path / "all_combined_all_rounds_crop_summary.xlsx"
 
     if not verification_file.exists():
         logger.error(f"Verification table file not found: {verification_file}")
