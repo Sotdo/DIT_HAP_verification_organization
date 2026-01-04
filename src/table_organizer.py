@@ -201,11 +201,12 @@ def build_verification_dataframe(image_data: list[dict], verification_meta: veri
     for (gene_num, gene_name, colony_id, date_str), group in grouped:
         # Get verification metadata for this gene
         gene_info = verification_meta.verification_genes[
-            verification_meta.verification_genes["Num"] == int(gene_num)
+            (verification_meta.verification_genes["Num"] == int(gene_num)) & 
+            (verification_meta.verification_genes["Gene"] == gene_name)
         ]
 
         if gene_info.empty:
-            logger.warning(f"No verification info found for gene {gene_num}")
+            logger.warning(f"No verification info found for gene {gene_num} and gene name {gene_name}")
             continue
 
         gene_row = gene_info.iloc[0]
@@ -303,7 +304,11 @@ def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: 
 
     # Sort concatenated DataFrame by gene_num_int and colony_num for consistency
     if not concatenated_df.empty:
-        concatenated_df = sort_dataframe_by_gene_and_colony(concatenated_df)
+        concatenated_df['round_num'] = concatenated_df['round'].apply(extract_round_number)
+        concatenated_df['gene_num_int'] = concatenated_df['gene_num'].astype(int)
+        concatenated_df['colony_num'] = concatenated_df['colony_id'].apply(extract_colony_number)
+        concatenated_df = concatenated_df.sort_values(['round_num', 'gene_num_int', 'colony_num'])
+        concatenated_df = concatenated_df.drop(columns=['round_num', 'gene_num_int', 'colony_num'])
 
     # Export individual round sheets file
     with pd.ExcelWriter(config.table_output_path, engine='openpyxl') as writer:
@@ -323,6 +328,8 @@ def export_all_rounds_summary(all_rounds_data: dict[str, pd.DataFrame], config: 
     # Export independent file with all rounds combined
     if not concatenated_df.empty:
         combined_output_file = config.table_output_path.parent / f"all_combined_{config.table_output_path.name}"
+        concatenated_df["Genotyping"] = ""
+        concatenated_df["Comments"] = ""
         concatenated_df.to_excel(combined_output_file, sheet_name='All Rounds Combined', index=False)
         logger.success(f"Combined rounds exported to independent Excel file: {combined_output_file}")
         logger.info(f"Combined file contains {len(concatenated_df)} total records from {len(all_rounds_data)} rounds")
