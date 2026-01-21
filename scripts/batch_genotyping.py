@@ -22,6 +22,7 @@ DAY_IMAGE_COLUMNS = {
 }
 
 MARKER_IMAGE_COLUMN = "HYG_image_path"
+ROUND0_MARKER_IMAGE_COLUMN = "NAT_image_path"
 
 # %% ============================= Data Classes =============================
 @dataclass
@@ -37,28 +38,36 @@ class configuration:
 logger.info("Starting batch genotyping process...")
 
 logger.info("Loading all images dataframe...")
-all_images_df = pd.read_excel("../results/all_rounds_combined_verification_summary.xlsx")
-bad_output_strain = pd.read_csv("../resource/bad_output_strain.csv")
+all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260104.xlsx")
+# nonE_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments != '')")
+nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna())")
+# processing_failed_df = nonE_or_commented_E_images_df.query("Genotyping != 'YES' and round != '1st_round' and round != '22th_round'")
+# sampled_failed_df = processing_failed_df.sample(n=20, random_state=42)
 
-bad_output_strain_data = pd.merge(
-    all_images_df,
-    bad_output_strain,
-    on=["gene_num", "colony_id"],
-    how="inner"
+# %%
+
+# %%
+# bad_output_strain_data = pd.merge(
+#     all_images_df,
+#     bad_output_strain,
+#     on=["gene_num", "colony_id"],
+#     how="inner"
+# )
+# %%
+
+config = configuration(
+    data_df=nonE_or_commented_E_images_df,
+    pdf_output_path=Path("../results/nonE_strain_or_commented_E_genotyping_results.pdf"),
+    table_output_path=Path("../results/nonE_strain_or_commented_E_genotyping_results.xlsx"),
+    log_file=Path("../logs/batch_genotyping_nonE_strain_or_commented_E.log")
 )
 
 # config = configuration(
-#     data_df=all_images_df,
-#     pdf_output_path=Path("../results/batch_genotyping_results.pdf"),
-#     table_output_path=Path("../results/batch_genotyping_results.xlsx")
+#     data_df=sampled_failed_df,
+#     pdf_output_path=Path("../results/sampled_failed_genotyping_results.pdf"),
+#     table_output_path=Path("../results/sampled_failed_genotyping_results.xlsx"),
+#     log_file=Path("../logs/batch_genotyping_sampled_failed.log")
 # )
-
-config = configuration(
-    data_df=bad_output_strain_data,
-    pdf_output_path=Path("../results/bad_output_strain.pdf"),
-    table_output_path=Path("../results/bad_output_strain_genotyping_results.xlsx"),
-    log_file=Path("../logs/batch_genotyping_bad_output_strain.log")
-)
 
 #  %% ============================= Logging Setup =============================
 logger.remove()
@@ -99,8 +108,10 @@ with PdfPages(config.pdf_output_path) as pdf:
             img_path = row[col]
             if pd.notna(img_path):
                 tetrad_image_paths[day] = Path(img_path)
-        
-        marker_image_path = row[MARKER_IMAGE_COLUMN]
+        if round == "0_round":
+            marker_image_path = row[ROUND0_MARKER_IMAGE_COLUMN]
+        else:
+            marker_image_path = row[MARKER_IMAGE_COLUMN]
 
         if pd.isna(marker_image_path) or not Path(marker_image_path).exists():
             logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Skipping genotyping.")

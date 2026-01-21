@@ -85,6 +85,12 @@ def main() -> None:
         df = pd.read_excel(config.table_file)
         # df = df.query("gene_num == 280")
         logger.info(f"Loaded {len(df)} entries from the table.")
+        not_processed_rounds = [
+            "22th_round"
+        ]
+        df = df[~df['round'].isin(not_processed_rounds)]
+        logger.info(" ")
+        logger.info("*"*30 + "Processing time-course tetrad images... " + "*"*30)
         process_time_course_tetrad_images(
             table_data = df,
             tetrad_config = config.tetrad_config,
@@ -95,9 +101,16 @@ def main() -> None:
     else:
         logger.info("Processing all rounds from renamed file folder...")
         all_rounds = [folder for folder in config.renamed_file_folder.iterdir() if folder.is_dir()]
+        not_processed_rounds = [
+            "22th_round"
+        ]
 
         for round_folder in all_rounds:
             logger.info(f"{'#'*20} Processing round folder: {round_folder.name} {'#'*20}")
+            if round_folder.name in not_processed_rounds:
+                # logger.info(f"Skipping unrecognized round folder: {round_folder.name}")
+                logger.info(" ")
+                continue
             round_config = roundConfig(
                 raw_data_folder_path = config.renamed_file_folder,
                 round_folder_name = round_folder.name,  # Process the first round only for this example
