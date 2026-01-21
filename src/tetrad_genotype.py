@@ -767,27 +767,27 @@ def filter_colonies(
         f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
     ).copy()
     
-    filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+    region, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
 
 
-    if filtered_regions.empty or restored_grid.empty:
+    if region.empty or restored_grid.empty:
         logger.warning("*** Grid restoration failed: No colonies detected or grid fitting failed. Filter colonies at the boundaries and try again.")
         left, right = w * 0.015, w * 0.985
         top, bottom = h * 0.015, h * 0.985
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {left} and centroid_x <= {right} and centroid_y >= {top} and centroid_y <= {bottom}"
         ).copy()
-        filtered_regions, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
-
-    if filtered_regions.empty or restored_grid.empty:
-        logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
-        filtered_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
-            filtered_regions,
-            expected_rows=config.expected_rows,
-            expected_cols=config.expected_cols,
-            x_spacing_ref=config.average_x_spacing,
-            y_spacing_ref=config.average_y_spacing,
-            spacing_tolerance=config.spacing_tolerance
+        region, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+    
+        if region.empty or restored_grid.empty:
+            logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
+            region, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
+                filtered_regions,
+                expected_rows=config.expected_rows,
+                expected_cols=config.expected_cols,
+                x_spacing_ref=config.average_x_spacing,
+                y_spacing_ref=config.average_y_spacing,
+                spacing_tolerance=config.spacing_tolerance
         )
     else:
         grid_spacing = np.median(np.sqrt(np.diff(restored_grid["expected_x"])**2 + np.diff(restored_grid["expected_y"])**2))
@@ -797,7 +797,7 @@ def filter_colonies(
         if restored_grid_left < -20 or restored_grid_top < -20 or restored_grid_right > w + 20 or restored_grid_bottom > h + 20:
             logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
 
-            filtered_regions, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
+            region, rotated_zoom_grid, rotation_angle, best_row, best_col, best_zoom = grid_fitting_and_optimization(
                 filtered_regions,
                 expected_rows=config.expected_rows,
                 expected_cols=config.expected_cols,
@@ -807,19 +807,18 @@ def filter_colonies(
             )
 
         else:
-            filtered_regions.dropna(subset=["row", "col"], inplace=True)
-            filtered_regions.set_index(["row", "col"], inplace=True, drop=True)
+            region.dropna(subset=["row", "col"], inplace=True)
+            region.set_index(["row", "col"], inplace=True, drop=True)
             
             # Use reindex to ensure all grid points are present and sorted
             grid_df = restored_grid.set_index(["row", "col"])
-            filtered_regions = filtered_regions.reindex(grid_df.index)
+            region = region.reindex(grid_df.index)
             
-            filtered_regions["grid_point_x"] = grid_df["expected_x"]
-            filtered_regions["grid_point_y"] = grid_df["expected_y"]
+            region["grid_point_x"] = grid_df["expected_x"]
+            region["grid_point_y"] = grid_df["expected_y"]
             
-            filtered_regions["area"] = filtered_regions["area"].fillna(0)
-    return filtered_regions
-
+            region["area"] = region["area"].fillna(0)
+    return region
 @logger.catch
 def colony_grid_table(
     image: np.ndarray,
