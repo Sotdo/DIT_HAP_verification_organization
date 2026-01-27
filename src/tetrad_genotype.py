@@ -808,10 +808,40 @@ def filter_colonies(
 
         else:
             region.dropna(subset=["row", "col"], inplace=True)
+            
+            # Handle duplicate (row, col) assignments - keep the one closest to grid point
+            if region.duplicated(subset=["row", "col"]).any():
+                logger.debug("Found duplicate grid assignments, keeping closest points")
+                # For each (row, col), calculate distance to expected position and keep minimum
+                region = region.copy()
+                region["row"] = region["row"].astype(int)
+                region["col"] = region["col"].astype(int)
+                
+                # Merge with expected positions
+                grid_df_temp = restored_grid.copy()
+                grid_df_temp["row"] = grid_df_temp["row"].astype(int)
+                grid_df_temp["col"] = grid_df_temp["col"].astype(int)
+                region = region.merge(grid_df_temp[["row", "col", "expected_x", "expected_y"]], on=["row", "col"], how="left")
+                
+                # Calculate distance to expected position
+                region["_dist_to_grid"] = np.sqrt(
+                    (region["centroid_x"] - region["expected_x"])**2 + 
+                    (region["centroid_y"] - region["expected_y"])**2
+                )
+                
+                # Keep the closest point for each (row, col)
+                region = region.loc[region.groupby(["row", "col"])["_dist_to_grid"].idxmin()]
+                region = region.drop(columns=["_dist_to_grid", "expected_x", "expected_y"])
+            
+            region["row"] = region["row"].astype(int)
+            region["col"] = region["col"].astype(int)
             region.set_index(["row", "col"], inplace=True, drop=True)
             
             # Use reindex to ensure all grid points are present and sorted
-            grid_df = restored_grid.set_index(["row", "col"])
+            grid_df = restored_grid.copy()
+            grid_df["row"] = grid_df["row"].astype(int)
+            grid_df["col"] = grid_df["col"].astype(int)
+            grid_df = grid_df.set_index(["row", "col"])
             region = region.reindex(grid_df.index)
             
             region["grid_point_x"] = grid_df["expected_x"]
@@ -888,7 +918,7 @@ def marker_plate_point_matching(
     
     if len(marker_centroids) == 0 or len(tetrad_centroids) == 0:
         logger.error(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: No centroids detected in marker or tetrad images for matching.")
-        return None, colony_regions, 1.0, 0.0, 0.0, 0.0, [], []
+        return None, colony_regions, marker_regions, 1.0, 0.0, 0.0, 0.0, [], []
 
     # Match marker centroids to tetrad centroids
     center_marker = np.mean(marker_centroids, axis=0)
@@ -1196,13 +1226,13 @@ if __name__ == "__main__":
 # }
 # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
 
-# # tetrad_image_paths={
-# #     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/3d/88_rpl1801_3d_#3_202411.cropped.png"),
-# #     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/4d/88_rpl1801_4d_#3_202411.cropped.png"),
-# #     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/5d/88_rpl1801_5d_#3_202411.cropped.png"),
-# #     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/6d/88_rpl1801_6d_#3_202411.cropped.png")
-# # }
-# # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/6th_round/replica/88_rpl1801_HYG_#3_202411.cropped.png")
+# tetrad_image_paths={
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/3d/68_npr2_3d_#2_202411.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/4d/68_npr2_4d_#2_202411.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/5d/68_npr2_5d_#2_202411.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/6d/68_npr2_6d_#2_202411.cropped.png")
+# }
+# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/replica/68_npr2_HYG_#2_202411.cropped.png")
 
 # config = Configuration(
 #     tetrad_image_paths=tetrad_image_paths,
@@ -1235,25 +1265,24 @@ if __name__ == "__main__":
 
 # # %%
 # marker_plate_image = io.imread(config.marker_image_path)
-# marker_aligned, colony_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+# marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
 #     last_day_colony_regions,
 #     marker_plate_image,
 #     config
 # )
 
-# if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-#     logger.error("Marker plate alignment failed. No aligned marker image available.")
-#     marker_aligned = marker_plate_image
+# # if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+# #     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
+# #     marker_aligned = marker_plate_image
 
 # marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
 # # %%
 # genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
-
 # all_colony_regions = pd.concat(
 #     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
 #     axis=1
 # ).sort_index(level=[1,0], axis=0)
-# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, radius=config.signal_detection_radius)
+# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
 
 # # %%
 # image = io.imread(tetrad_image_paths[3])
