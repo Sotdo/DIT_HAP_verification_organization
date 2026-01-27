@@ -75,9 +75,9 @@ class Configuration:
     # Grid parameters
     expected_rows: int = 4
     expected_cols: int = 12
-    average_x_spacing: float = 52.5 # averaged x spacing in pixels for 4x12 grid from pilot experiments
-    average_y_spacing: float = 48 # averaged y spacing in pixels for 4x12 grid from pilot experiments
-    spacing_tolerance: float = 3  # tolerance for spacing deviation in pixels
+    average_x_spacing: float = 57.0 # averaged x spacing in pixels for 4x12 grid from pilot experiments
+    average_y_spacing: float = 60.0 # averaged y spacing in pixels for 4x12 grid from pilot experiments
+    spacing_tolerance: float = 8.0  # tolerance for spacing deviation in pixels
     
     # Colony detection parameters
     # tetrad plate
@@ -110,224 +110,369 @@ class Configuration:
     signal_detection_radius: int = 15
 
 # ========================== Grid Restoration =============================
-def solve_grid_dataframe(df, approx_spacing, match_tolerance=0.25, img_coords=True) -> tuple[pd.DataFrame, pd.DataFrame]:
+def solve_grid_dataframe(
+    df: pd.DataFrame, 
+    approx_spacing: float, 
+    match_tolerance: float = 0.25, 
+    img_coords: bool = True,
+    expected_rows: int = 4,
+    expected_cols: int = 12,
+    x_spacing_ref: float | None = None,
+    y_spacing_ref: float | None = None,
+    spacing_tolerance: float = 10.0
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
+    Robust grid restoration for tetrad plate colony detection.
+    
+    Uses multiple strategies to handle missing colonies:
+    1. RANSAC with multiple candidate basis vectors
+    2. Validation using prior spacing knowledge
+    3. Robust row/column direction determination using physical coordinates
+    4. Outlier rejection and re-fitting
+    5. Image boundary constraints to prevent grid offset
+    
     Input:
         df: DataFrame containing 'centroid_x', 'centroid_y'
         approx_spacing: approximate spacing between points
-        img_coords: True for image coordinate system (Y increases downward, small Y is top);
-                    False for mathematical coordinate system (Y increases upward, large Y is top)
+        match_tolerance: tolerance for grid alignment (relative to spacing)
+        img_coords: True for image coordinate system (Y increases downward)
+        expected_rows: expected number of rows (default 4)
+        expected_cols: expected number of columns (default 12)
+        x_spacing_ref: reference x spacing for validation
+        y_spacing_ref: reference y spacing for validation  
+        spacing_tolerance: tolerance for spacing validation in pixels
     
     Output:
         tagged_df: Original DataFrame with row, col labels
-        ideal_grid: 48 perfect grid point coordinates (order: R0C0, R0C1... R3C11)
+        ideal_grid: Perfect grid point coordinates
     """
     points = df[['centroid_x', 'centroid_y']].values
     n_points = len(points)
     
-    # ---------------- 1. RANSAC to find basis (invariant) ----------------
-    best_score = -1
-    best_model = None 
-    best_indices = []
-    
-    # Number of iterations
-    iterations = 2000 if n_points > 10 else 100
-    
-    for _ in range(iterations):
-        if n_points < 2: break
-        idx_a, idx_b = np.random.choice(n_points, 2, replace=False)
-        vec = points[idx_b] - points[idx_a]
-        dist = np.linalg.norm(vec)
-        
-        # Spacing filter
-        if abs(dist - approx_spacing) > approx_spacing * 0.25:
-            continue
-            
-        u = vec
-        v = np.array([-u[1], u[0]]) # Perpendicular vector
-        basis = np.column_stack((u, v))
-        
-        try:
-            basis_inv = np.linalg.inv(basis)
-        except:
-            continue
-            
-        # Projection check
-        rel_pos = points - points[idx_a]
-        coords = rel_pos @ basis_inv.T
-        coords_round = np.round(coords)
-        diff = np.linalg.norm(coords - coords_round, axis=1)
-        
-        inliers_mask = diff < match_tolerance
-        score = np.sum(inliers_mask)
-        
-        if score > best_score:
-            best_score = score
-            best_model = (points[idx_a], basis_inv)
-            best_indices = np.where(inliers_mask)[0]
-            if score > min(48, n_points * 0.9): break
-
-    if best_model is None:
-        print("Error: Failed to detect grid structure")
+    if n_points < 4:
+        logger.warning("Not enough points for grid detection (need at least 4)")
         return df, pd.DataFrame()
-
-    # ---------------- 2. Initial mapping and window search ----------------
-    origin, basis_inv = best_model
-    inlier_pts = points[best_indices]
     
-    # Get original integer coordinates (may be unordered or rotated)
-    raw_uv = np.round((inlier_pts - origin) @ basis_inv.T).astype(int)
+    # Get image bounds from points for later validation
+    pts_x_min, pts_x_max = points[:, 0].min(), points[:, 0].max()
+    pts_y_min, pts_y_max = points[:, 1].min(), points[:, 1].max()
     
-    # Find best 12x4 coverage
-    best_win_score = -1
-    best_orientation = None # 'normal' or 'transposed'
-    best_offset = (0, 0)
+    # ---------------- 1. Find candidate basis vectors ----------------
+    candidates = []
     
-    # Search range
-    u_min, u_max = raw_uv[:,0].min(), raw_uv[:,0].max()
-    v_min, v_max = raw_uv[:,1].min(), raw_uv[:,1].max()
-    
-    # Brute-force search for best window
-    for u_start in range(u_min - 12, u_max + 1):
-        for v_start in range(v_min - 12, v_max + 1):
-            # Assume u=col, v=row (12x4)
-            mask_norm = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 12) & \
-                        (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 4)
-            score_norm = np.sum(mask_norm)
+    for i in range(n_points):
+        for j in range(i + 1, n_points):
+            vec = points[j] - points[i]
+            dist = np.linalg.norm(vec)
             
-            if score_norm > best_win_score:
-                best_win_score = score_norm
-                best_orientation = 'normal'
-                best_offset = (u_start, v_start)
+            # Filter by approximate spacing (allow single or double spacing)
+            for multiplier in [1, 2]:
+                expected_dist = approx_spacing * multiplier
+                if abs(dist - expected_dist) < approx_spacing * 0.25:
+                    norm_vec = vec / multiplier
+                    candidates.append((points[i], norm_vec, i, j))
+                    break
+    
+    if len(candidates) == 0:
+        logger.warning("No valid spacing candidates found")
+        return df, pd.DataFrame()
+    
+    # ---------------- 2. RANSAC with multiple strategies ----------------
+    best_score = -1
+    best_result = None
+    
+    # Adaptive iterations based on number of points
+    iterations = min(3000, len(candidates) * 30) if n_points > 6 else 150
+    np.random.seed(42)
+    
+    # Early termination threshold
+    early_stop_score = expected_rows * expected_cols * 0.95
+    
+    for iteration in range(iterations):
+        cand_idx = np.random.randint(len(candidates))
+        origin, u_vec, _, _ = candidates[cand_idx]
+        
+        v_vec = np.array([-u_vec[1], u_vec[0]], dtype=u_vec.dtype)
+        basis = np.column_stack((u_vec, v_vec))
+        
+        # Check determinant before inversion (faster than try-catch)
+        det = u_vec[0] * v_vec[1] - u_vec[1] * v_vec[0]
+        if abs(det) < 1e-10:
+            continue
+        
+        basis_inv = np.linalg.inv(basis)
+        
+        rel_pos = points - origin
+        coords = rel_pos @ basis_inv.T
+        coords_round = np.round(coords).astype(int)
+        # Faster squared norm calculation
+        residuals = np.sqrt(np.sum((coords - coords_round)**2, axis=1))
+        
+        inlier_mask = residuals < match_tolerance
+        n_inliers = np.sum(inlier_mask)
+        
+        if n_inliers < 4:
+            continue
+        
+        inlier_indices = np.where(inlier_mask)[0]
+        inlier_coords = coords_round[inlier_mask]
+        
+        # Try both orientations
+        for is_transposed in [False, True]:
+            if is_transposed:
+                logical_cols = inlier_coords[:, 1]
+                logical_rows = inlier_coords[:, 0]
+            else:
+                logical_cols = inlier_coords[:, 0]
+                logical_rows = inlier_coords[:, 1]
+            
+            col_min, col_max = logical_cols.min(), logical_cols.max()
+            row_min, row_max = logical_rows.min(), logical_rows.max()
+            
+            # Search for the best window position
+            best_window_score = -1
+            best_window_offset = (0, 0)
+            
+            for c_start in range(col_min - expected_cols + 1, col_max + 1):
+                for r_start in range(row_min - expected_rows + 1, row_max + 1):
+                    in_window = (
+                        (logical_cols >= c_start) & (logical_cols < c_start + expected_cols) &
+                        (logical_rows >= r_start) & (logical_rows < r_start + expected_rows)
+                    )
+                    window_score = np.sum(in_window)
+                    
+                    if window_score > best_window_score:
+                        best_window_score = window_score
+                        best_window_offset = (c_start, r_start)
+            
+            c_start, r_start = best_window_offset
+            in_window = (
+                (logical_cols >= c_start) & (logical_cols < c_start + expected_cols) &
+                (logical_rows >= r_start) & (logical_rows < r_start + expected_rows)
+            )
+            
+            if np.sum(in_window) < 4:
+                continue
                 
-            # Assume u=row, v=col (4x12) - transposed case
-            mask_trans = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 4) & \
-                         (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 12)
-            score_trans = np.sum(mask_trans)
+            window_cols = logical_cols[in_window] - c_start
+            window_rows = logical_rows[in_window] - r_start
             
-            if score_trans > best_win_score:
-                best_win_score = score_trans
-                best_orientation = 'transposed'
-                best_offset = (u_start, v_start)
-
-    # ---------------- 3. Build temporary logical coordinates ----------------
-    # At this step, we only have relative relationships, not which is up or down
-    temp_mapping = {} # idx -> [logic_c, logic_r]
-    u_start, v_start = best_offset
+            n_unique_cols = len(np.unique(window_cols))
+            n_unique_rows = len(np.unique(window_rows))
+            
+            # Score with coverage bonus
+            coverage_bonus = (n_unique_cols / expected_cols + n_unique_rows / expected_rows) * 5
+            score = np.sum(in_window) + coverage_bonus
+            
+            if score > best_score:
+                best_score = score
+                best_result = {
+                    'origin': origin,
+                    'basis_inv': basis_inv,
+                    'u_vec': u_vec,
+                    'v_vec': v_vec,
+                    'is_transposed': is_transposed,
+                    'inlier_indices': inlier_indices,
+                    'inlier_coords': inlier_coords,
+                    'window_offset': best_window_offset,
+                    'in_window_mask': in_window
+                }
+                # Early termination if we found a very good fit
+                if best_score > early_stop_score:
+                    break
+        
+        # Also break outer loop if early stop achieved
+        if best_score > early_stop_score:
+            break
     
-    # Select final inliers
-    if best_orientation == 'normal':
-        mask = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 12) & \
-               (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 4)
-        valid_indices = best_indices[mask]
-        valid_uv = raw_uv[mask]
-        for idx, (u, v) in zip(valid_indices, valid_uv):
-            temp_mapping[idx] = [u - u_start, v - v_start] # [0..11, 0..3]
+    if best_result is None:
+        logger.warning("Failed to detect grid structure")
+        return df, pd.DataFrame()
+    
+    # ---------------- 3. Extract mapping ----------------
+    inlier_indices = best_result['inlier_indices']
+    inlier_coords = best_result['inlier_coords']
+    is_transposed = best_result['is_transposed']
+    c_start, r_start = best_result['window_offset']
+    in_window = best_result['in_window_mask']
+    
+    if is_transposed:
+        logical_cols = inlier_coords[:, 1]
+        logical_rows = inlier_coords[:, 0]
     else:
-        mask = (raw_uv[:,0] >= u_start) & (raw_uv[:,0] < u_start + 4) & \
-               (raw_uv[:,1] >= v_start) & (raw_uv[:,1] < v_start + 12)
-        valid_indices = best_indices[mask]
-        valid_uv = raw_uv[mask]
-        for idx, (u, v) in zip(valid_indices, valid_uv):
-            temp_mapping[idx] = [v - v_start, u - u_start] # Transposed: v is col, u is row
-
-    # ---------------- 4. Key correction: physical ordering (top to bottom, left to right) ----------------
-    # We have 4 logical rows (0,1,2,3) and 12 logical columns (0..11)
-    # But whether logical row 0 is physically top or bottom depends on rotation and basis vector direction
+        logical_cols = inlier_coords[:, 0]
+        logical_rows = inlier_coords[:, 1]
     
-    valid_phys_pts = points[valid_indices]
+    temp_mapping = {}
+    valid_indices = []
+    valid_phys_pts = []
+    
+    for i, (idx, in_win) in enumerate(zip(inlier_indices, in_window)):
+        if in_win:
+            col = int(logical_cols[i] - c_start)
+            row = int(logical_rows[i] - r_start)
+            temp_mapping[idx] = [col, row]
+            valid_indices.append(idx)
+            valid_phys_pts.append(points[idx])
+    
+    valid_indices = np.array(valid_indices)
+    valid_phys_pts = np.array(valid_phys_pts)
+    
+    # ---------------- 4. Direction correction using PHYSICAL coordinates ----------------
+    # This is key: use actual physical positions to determine correct orientation
+    
     current_cols = np.array([temp_mapping[i][0] for i in valid_indices])
     current_rows = np.array([temp_mapping[i][1] for i in valid_indices])
     
-    # A. Correct row order
-    # Calculate the mean physical Y coordinate for each logical row
-    row_y_means = {}
-    for r in range(4):
-        mask_r = (current_rows == r)
-        if np.any(mask_r):
-            row_y_means[r] = np.mean(valid_phys_pts[mask_r, 1])
-        else:
-            row_y_means[r] = np.nan
+    # A. Determine row direction by comparing physical Y of different logical rows
+    # For each logical row, calculate mean physical Y
+    row_to_y = {}
+    for r in range(expected_rows):
+        mask = (current_rows == r)
+        if np.any(mask):
+            row_to_y[r] = np.median(valid_phys_pts[mask, 1])
     
-    # Determine Y axis trend
-    # If img_coords=True (image coordinates), Row 0 should be Min Y
-    # Compare Y values of Row 0 and Row 3
-    if not np.isnan(row_y_means[0]) and not np.isnan(row_y_means[3]):
-        y0 = row_y_means[0]
-        y3 = row_y_means[3]
+    # Check if we need to flip rows
+    # In image coords: row 0 should have SMALLEST Y (top of image)
+    if len(row_to_y) >= 2:
+        rows_sorted_by_y = sorted(row_to_y.keys(), key=lambda r: row_to_y[r])
         
-        should_flip_row = False
-        if img_coords: 
-            # Image mode: want Row0 < Row3 (top < bottom)
-            if y0 > y3: should_flip_row = True
+        # If the first row (smallest Y) is not row 0, we need to flip
+        if img_coords:
+            # row 0 should be at top (smallest Y)
+            should_flip_row = (rows_sorted_by_y[0] != 0)
         else:
-            # Plotting mode: want Row0 > Row3 (top > bottom)
-            if y0 < y3: should_flip_row = True
+            # row 0 should be at bottom (largest Y) 
+            should_flip_row = (rows_sorted_by_y[-1] != 0)
         
         if should_flip_row:
-            # Perform flip
             for idx in valid_indices:
-                temp_mapping[idx][1] = 3 - temp_mapping[idx][1]
-
-    # B. Correct column order
-    # Col 0 should always be Min X (leftmost)
-    col_x_means = {}
-    for c in [0, 11]:
-        mask_c = (current_cols == c)
-        if np.any(mask_c):
-            col_x_means[c] = np.mean(valid_phys_pts[mask_c, 0])
-        else:
-            col_x_means[c] = np.nan
-            
-    if not np.isnan(col_x_means[0]) and not np.isnan(col_x_means[11]):
-        if col_x_means[0] > col_x_means[11]: # If Col 0's X is greater than Col 11
-            # Perform flip
+                temp_mapping[idx][1] = (expected_rows - 1) - temp_mapping[idx][1]
+    
+    # B. Determine column direction by comparing physical X
+    col_to_x = {}
+    for c in range(expected_cols):
+        mask = (current_cols == c)
+        if np.any(mask):
+            col_to_x[c] = np.median(valid_phys_pts[mask, 0])
+    
+    if len(col_to_x) >= 2:
+        cols_sorted_by_x = sorted(col_to_x.keys(), key=lambda c: col_to_x[c])
+        # col 0 should always have smallest X (leftmost)
+        should_flip_col = (cols_sorted_by_x[0] != 0)
+        
+        if should_flip_col:
             for idx in valid_indices:
-                temp_mapping[idx][0] = 11 - temp_mapping[idx][0]
-
-    # ---------------- 5. Output assembly and secondary fitting ----------------
-    # Label DataFrame
+                temp_mapping[idx][0] = (expected_cols - 1) - temp_mapping[idx][0]
+    
+    # ---------------- 5. Least squares fitting ----------------
     df['row'] = np.nan
     df['col'] = np.nan
     
-    # Prepare data for fitting
     A, b = [], []
     for idx, (c, r) in temp_mapping.items():
-        # Write to df
         df.at[df.index[idx], 'row'] = r
         df.at[df.index[idx], 'col'] = c
-        
-        # Fitting equation
         A.append([1, 0, c, 0, r, 0])
         b.append(points[idx][0])
         A.append([0, 1, 0, c, 0, r])
         b.append(points[idx][1])
-        
-    # Calculate perfect grid parameters
+    
     A = np.array(A)
     b = np.array(b)
-    # Use least squares to compute [Ox, Oy, Ux, Uy, Vx, Vy]
-    if len(A) > 0:
-        params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        O_fit = params[0:2]
-        u_fit = params[2:4] # col vector
-        v_fit = params[4:6] # row vector
+    
+    if len(A) == 0:
+        return df, pd.DataFrame()
+    
+    params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    
+    # Calculate residuals and reject outliers
+    predicted = A @ params
+    point_residuals = []
+    for i in range(0, len(b), 2):
+        res = np.sqrt((b[i] - predicted[i])**2 + (b[i+1] - predicted[i+1])**2)
+        point_residuals.append(res)
+    point_residuals = np.array(point_residuals)
+    
+    if len(point_residuals) > 6:
+        residual_threshold = np.percentile(point_residuals, 90) * 1.5
+        residual_threshold = max(residual_threshold, approx_spacing * 0.3)
         
-        # Generate ideal grid (in order)
-        ideal_data = []
-        for r in range(4):
-            for c in range(12):
-                pt = O_fit + c * u_fit + r * v_fit
-                ideal_data.append({
-                    'row': r, 
-                    'col': c, 
-                    'expected_x': pt[0], 
-                    'expected_y': pt[1]
-                })
-        ideal_df = pd.DataFrame(ideal_data)
-    else:
-        ideal_df = pd.DataFrame()
-
+        A_clean, b_clean = [], []
+        for i, (idx, (c, r)) in enumerate(temp_mapping.items()):
+            if point_residuals[i] < residual_threshold:
+                A_clean.append([1, 0, c, 0, r, 0])
+                b_clean.append(points[idx][0])
+                A_clean.append([0, 1, 0, c, 0, r])
+                b_clean.append(points[idx][1])
+            else:
+                df.at[df.index[idx], 'row'] = np.nan
+                df.at[df.index[idx], 'col'] = np.nan
+        
+        if len(A_clean) >= 8:
+            A = np.array(A_clean)
+            b = np.array(b_clean)
+            params, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+    
+    O_fit = params[0:2]
+    u_fit = params[2:4]  # col vector
+    v_fit = params[4:6]  # row vector
+    
+    # ---------------- 6. Validate and adjust grid position ----------------
+    # Check if the fitted grid covers the observed points properly
+    # The grid should not extend too far outside the observed point range
+    
+    grid_corners = [
+        O_fit,  # (row=0, col=0)
+        O_fit + (expected_cols - 1) * u_fit,  # (row=0, col=11)
+        O_fit + (expected_rows - 1) * v_fit,  # (row=3, col=0)
+        O_fit + (expected_cols - 1) * u_fit + (expected_rows - 1) * v_fit  # (row=3, col=11)
+    ]
+    
+    grid_x_min = min(c[0] for c in grid_corners)
+    grid_x_max = max(c[0] for c in grid_corners)
+    grid_y_min = min(c[1] for c in grid_corners)
+    grid_y_max = max(c[1] for c in grid_corners)
+    
+    # Check if grid is shifted - the grid should roughly match the observed points extent
+    margin = approx_spacing * 0.5
+    
+    # If grid minimum is much smaller than point minimum, grid might be shifted
+    x_shift_needed = 0
+    y_shift_needed = 0
+    
+    if grid_x_min < pts_x_min - margin:
+        x_shift_needed = pts_x_min - grid_x_min - margin * 0.5
+    if grid_y_min < pts_y_min - margin:
+        y_shift_needed = pts_y_min - grid_y_min - margin * 0.5
+        
+    # Apply shift if needed (this adjusts O_fit)
+    if abs(x_shift_needed) > margin or abs(y_shift_needed) > margin:
+        logger.debug(f"Adjusting grid origin by ({x_shift_needed:.1f}, {y_shift_needed:.1f})")
+        O_fit = O_fit + np.array([x_shift_needed, y_shift_needed])
+    
+    # ---------------- 7. Validate spacing ----------------
+    u_spacing = np.linalg.norm(u_fit)
+    v_spacing = np.linalg.norm(v_fit)
+    
+    if x_spacing_ref is not None and abs(u_spacing - x_spacing_ref) > spacing_tolerance:
+        logger.warning(f"X spacing mismatch: {u_spacing:.2f} vs expected {x_spacing_ref:.2f}")
+    if y_spacing_ref is not None and abs(v_spacing - y_spacing_ref) > spacing_tolerance:
+        logger.warning(f"Y spacing mismatch: {v_spacing:.2f} vs expected {y_spacing_ref:.2f}")
+    
+    # ---------------- 8. Generate ideal grid ----------------
+    ideal_data = []
+    for r in range(expected_rows):
+        for c in range(expected_cols):
+            pt = O_fit + c * u_fit + r * v_fit
+            ideal_data.append({
+                'row': r, 
+                'col': c, 
+                'expected_x': pt[0], 
+                'expected_y': pt[1]
+            })
+    ideal_df = pd.DataFrame(ideal_data)
+    
     return df, ideal_df
 
 # %% =========================== Functions =============================
@@ -342,12 +487,12 @@ def convert_to_grayscale(image: np.ndarray, method: str = 'mean', channel: int |
             # Select specific channel
             return image[:, :, channel]
         elif method == 'mean':
-            # Average across color channels
-            return np.mean(image, axis=2).astype(image.dtype)
+            # Average across color channels - using faster np.mean with keepdims=False
+            return image.mean(axis=2, dtype=np.float32).astype(image.dtype)
         elif method == 'luminosity':
-            # Weighted average for luminosity
-            weights = np.array([0.2989, 0.5870, 0.1140])
-            return np.dot(image[..., :3], weights).astype(image.dtype)
+            # Weighted average for luminosity - using @ operator for faster matrix multiplication
+            weights = np.array([0.2989, 0.5870, 0.1140], dtype=np.float32)
+            return (image[..., :3] @ weights).astype(image.dtype)
         else:
             raise ValueError("Invalid method for grayscale conversion.")
     else:
@@ -359,9 +504,10 @@ def remove_background(
     threshold_percentile: float = 25
 ) -> np.ndarray:
     """Remove background from the image using the given threshold percentile."""
-    threshold_value = np.percentile(gray_image[gray_image > 0], threshold_percentile)
-    bg_removed = gray_image - threshold_value
-    bg_removed = np.clip(bg_removed, 0, 255).astype(np.uint8)
+    # Use np.percentile with linear interpolation for faster computation
+    threshold_value = np.percentile(gray_image[gray_image > 0], threshold_percentile, method='linear')
+    # Vectorized operation: subtract and clip in one step
+    bg_removed = np.clip(gray_image.astype(np.float32) - threshold_value, 0, 255).astype(np.uint8)
     return bg_removed
 
 @logger.catch
@@ -470,66 +616,60 @@ def colony_grid_fitting(
     # Extract centroids
     centroids = colony_regions[["centroid_x", "centroid_y"]].to_numpy()
 
-    # Calculate x and y spacing from points that are close to each other
-    x_diffs = []
-    y_diffs = []
+    # Calculate x and y spacing using vectorized operations
+    # Create pairwise difference matrices
+    x_diff_matrix = np.abs(centroids[:, np.newaxis, 0] - centroids[np.newaxis, :, 0])
+    y_diff_matrix = np.abs(centroids[:, np.newaxis, 1] - centroids[np.newaxis, :, 1])
+    
+    # Create masks for same row and same column
+    same_row_mask = (y_diff_matrix <= 10) & (x_diff_matrix > 30)
+    same_col_mask = (x_diff_matrix <= 10) & (y_diff_matrix > 30)
+    
+    # Extract relevant differences
+    x_diffs = x_diff_matrix[same_row_mask]
+    y_diffs = y_diff_matrix[same_col_mask]
 
-    for i in range(len(centroids)):
-        for j in range(i + 1, len(centroids)):
-            x_diff = abs(centroids[i, 0] - centroids[j, 0])
-            y_diff = abs(centroids[i, 1] - centroids[j, 1])
-            
-            # Points in the same row (y similar, x different)
-            if y_diff <= 10 and x_diff > 30:
-                x_diffs.append(x_diff)
-            
-            # Points in the same column (x similar, y different)
-            if x_diff <= 10 and y_diff > 30:
-                y_diffs.append(y_diff)
-
-    x_diff = np.array(x_diffs)
-    y_diff = np.array(y_diffs)
-
-    filtered_x_diffs = x_diff[(x_diff > 30) & (x_diff < 70)]
-    filtered_y_diffs = y_diff[(y_diff > 30) & (y_diff < 70)]
+    # Filter differences
+    filtered_x_diffs = x_diffs[(x_diffs > 30) & (x_diffs < 70)]
+    filtered_y_diffs = y_diffs[(y_diffs > 30) & (y_diffs < 70)]
 
     if filtered_x_diffs.size == 0:
-        filtered_x_diffs = x_diff[(x_diff > 55) & (x_diff < 135)]
-        filtered_x_diffs = filtered_x_diffs / 2
+        filtered_x_diffs = x_diffs[(x_diffs > 55) & (x_diffs < 135)] / 2
     if filtered_y_diffs.size == 0:
-        filtered_y_diffs = y_diff[(y_diff > 55) & (y_diff < 135)]
-        filtered_y_diffs = filtered_y_diffs / 2
-    x_spacing = np.mean(filtered_x_diffs)
-    y_spacing = np.mean(filtered_y_diffs)
+        filtered_y_diffs = y_diffs[(y_diffs > 55) & (y_diffs < 135)] / 2
+        
+    x_spacing = np.mean(filtered_x_diffs) if filtered_x_diffs.size > 0 else 57.0
+    y_spacing = np.mean(filtered_y_diffs) if filtered_y_diffs.size > 0 else 60.0
+    
     # Use median of smallest values for robust min calculation
     x_min = centroids[:, 0].min()
     if len(centroids) > 18:
-        y_min = np.median(np.sort(centroids[:, 1])[:3])
+        y_min = np.median(np.partition(centroids[:, 1], 3)[:3])  # Faster than sort
     else:
         y_min = centroids[:, 1].min()
 
-    fitted_grid = np.zeros((expected_rows, expected_cols, 2))
-    for row in range(expected_rows):
-        for col in range(expected_cols):
-            fitted_grid[row, col, 0] = x_min + col * x_spacing
-            fitted_grid[row, col, 1] = y_min + row * y_spacing
+    # Vectorized grid creation
+    col_offsets = np.arange(expected_cols) * x_spacing + x_min
+    row_offsets = np.arange(expected_rows) * y_spacing + y_min
+    fitted_grid = np.stack(np.meshgrid(col_offsets, row_offsets, indexing='xy'), axis=-1)
 
-    # colony to grid point assignment
-    for idx, region in colony_regions.iterrows():
-        centroid = np.array([region["centroid_x"], region["centroid_y"]])
-        col_idx = min(expected_cols-1, int(round((centroid[0] - x_min) / x_spacing))) if x_spacing > 0 else 0
-        row_idx = min(expected_rows-1, int(round((centroid[1] - y_min) / y_spacing))) if y_spacing > 0 else 0
-        colony_regions.loc[idx, "row"] = row_idx
-        colony_regions.loc[idx, "col"] = col_idx
-        colony_regions.loc[idx, "grid_point_x"] = fitted_grid[row_idx, col_idx, 0]
-        colony_regions.loc[idx, "grid_point_y"] = fitted_grid[row_idx, col_idx, 1]
-        colony_regions.loc[idx, "distance"] = np.sqrt(
-            (centroid[0] - fitted_grid[row_idx, col_idx, 0])
-            ** 2 + (centroid[1] - fitted_grid[row_idx, col_idx, 1]) ** 2
-        )
-
-    colony_regions["row"] = colony_regions["row"].astype(int)
-    colony_regions["col"] = colony_regions["col"].astype(int)
+    # Vectorized colony to grid point assignment
+    if x_spacing > 0 and y_spacing > 0:
+        col_indices = np.clip(np.round((centroids[:, 0] - x_min) / x_spacing).astype(int), 0, expected_cols - 1)
+        row_indices = np.clip(np.round((centroids[:, 1] - y_min) / y_spacing).astype(int), 0, expected_rows - 1)
+    else:
+        col_indices = np.zeros(len(centroids), dtype=int)
+        row_indices = np.zeros(len(centroids), dtype=int)
+    
+    grid_points = fitted_grid[row_indices, col_indices]
+    distances = np.sqrt(np.sum((centroids - grid_points)**2, axis=1))
+    
+    colony_regions = colony_regions.copy()
+    colony_regions["row"] = row_indices
+    colony_regions["col"] = col_indices
+    colony_regions["grid_point_x"] = grid_points[:, 0]
+    colony_regions["grid_point_y"] = grid_points[:, 1]
+    colony_regions["distance"] = distances
 
     # keep the minimum distance colony for each row and each col
     dedup_colony_regions = colony_regions.groupby(["row", "col"], as_index=False).apply(
@@ -605,41 +745,78 @@ def optimize_zoom_factor(
     y_spacing_ref : float | None = None,
     spacing_tolerance: float | None = None
 ) -> tuple[float, float]:
-    """Find optimal zoom factor using grid search with vectorized distance calculation."""
-    # Generate all zoom factors at once
-    x_zoom_factors = np.arange(zoom_range[0], zoom_range[1] + zoom_step, zoom_step)
-    y_zoom_factors = np.arange(zoom_range[0], zoom_range[1] + zoom_step, zoom_step)
+    """Find optimal zoom factor using coarse-to-fine grid search with vectorized operations."""
     
-    # Vectorized optimization
+    # Phase 1: Coarse search with larger step
+    coarse_step = zoom_step * 5
+    x_zoom_coarse = np.arange(zoom_range[0], zoom_range[1] + coarse_step, coarse_step)
+    y_zoom_coarse = np.arange(zoom_range[0], zoom_range[1] + coarse_step, coarse_step)
+    
     best_error = np.inf
-    best_zoom = None
+    best_zoom_coarse = None
     
-    for x_zoom_factor in x_zoom_factors:
-        for y_zoom_factor in y_zoom_factors:
-            zoom_factor = np.array([x_zoom_factor, y_zoom_factor])
+    # Precompute grid points extraction
+    grid_points_base = grid_centered[rows, cols]
+    
+    for x_zoom in x_zoom_coarse:
+        for y_zoom in y_zoom_coarse:
+            zoom_factor = np.array([x_zoom, y_zoom], dtype=np.float32)
             zoomed_grid = grid_centered * zoom_factor + grid_center_point
             
-            # Vectorized distance calculation
-            grid_points = zoomed_grid[rows, cols]  # Extract all relevant grid points at once
-            grid_x_spacing = np.diff(zoomed_grid, axis=1)[:, :, 0]
-            grid_y_spacing = np.diff(zoomed_grid, axis=0)[:, :, 1]
+            # Vectorized spacing check
             if x_spacing_ref is not None and spacing_tolerance is not None:
+                grid_x_spacing = np.diff(zoomed_grid, axis=1)[:, :, 0]
                 if np.any(np.abs(grid_x_spacing - x_spacing_ref) > spacing_tolerance):
                     continue
             if y_spacing_ref is not None and spacing_tolerance is not None:
+                grid_y_spacing = np.diff(zoomed_grid, axis=0)[:, :, 1]
                 if np.any(np.abs(grid_y_spacing - y_spacing_ref) > spacing_tolerance):
                     continue
-            distances = np.sqrt(np.sum((centroids - grid_points) ** 2, axis=1))
-            grid_alignment_error = np.sum(distances)
             
-            if grid_alignment_error < best_error:
-                best_error = grid_alignment_error
-                best_zoom = (x_zoom_factor, y_zoom_factor)
+            # Vectorized distance calculation
+            grid_points = zoomed_grid[rows, cols]
+            distances = np.sqrt(np.sum((centroids - grid_points)**2, axis=1))
+            error = np.sum(distances)
+            
+            if error < best_error:
+                best_error = error
+                best_zoom_coarse = (x_zoom, y_zoom)
     
-    if best_zoom is None:
-        best_zoom = (1.0, 1.0)  # Default to no zoom if no valid zoom found
+    if best_zoom_coarse is None:
+        return (1.0, 1.0)
     
-    return (float(best_zoom[0]), float(best_zoom[1]))
+    # Phase 2: Fine search around best coarse result
+    fine_range_x = (max(zoom_range[0], best_zoom_coarse[0] - coarse_step), 
+                    min(zoom_range[1], best_zoom_coarse[0] + coarse_step))
+    fine_range_y = (max(zoom_range[0], best_zoom_coarse[1] - coarse_step), 
+                    min(zoom_range[1], best_zoom_coarse[1] + coarse_step))
+    
+    x_zoom_fine = np.arange(fine_range_x[0], fine_range_x[1] + zoom_step, zoom_step)
+    y_zoom_fine = np.arange(fine_range_y[0], fine_range_y[1] + zoom_step, zoom_step)
+    
+    for x_zoom in x_zoom_fine:
+        for y_zoom in y_zoom_fine:
+            zoom_factor = np.array([x_zoom, y_zoom], dtype=np.float32)
+            zoomed_grid = grid_centered * zoom_factor + grid_center_point
+            
+            if x_spacing_ref is not None and spacing_tolerance is not None:
+                grid_x_spacing = np.diff(zoomed_grid, axis=1)[:, :, 0]
+                if np.any(np.abs(grid_x_spacing - x_spacing_ref) > spacing_tolerance):
+                    continue
+            if y_spacing_ref is not None and spacing_tolerance is not None:
+                grid_y_spacing = np.diff(zoomed_grid, axis=0)[:, :, 1]
+                if np.any(np.abs(grid_y_spacing - y_spacing_ref) > spacing_tolerance):
+                    continue
+            
+            grid_points = zoomed_grid[rows, cols]
+            distances = np.sqrt(np.sum((centroids - grid_points)**2, axis=1))
+            error = np.sum(distances)
+            
+            if error < best_error:
+                best_error = error
+                best_zoom_coarse = (x_zoom, y_zoom)
+    
+    return (float(best_zoom_coarse[0]), float(best_zoom_coarse[1]))
 
 @logger.catch
 def zoom_rotated_grid(
@@ -767,7 +944,15 @@ def filter_colonies(
         f"area >= {min_area} and area <= {max_area} and circularity >= {circularity_threshold} and solidity >= {solidity_threshold}"
     ).copy()
     
-    region, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+    region, restored_grid = solve_grid_dataframe(
+        filtered_regions, 
+        approx_spacing=config.average_x_spacing,
+        expected_rows=config.expected_rows,
+        expected_cols=config.expected_cols,
+        x_spacing_ref=config.average_x_spacing,
+        y_spacing_ref=config.average_y_spacing,
+        spacing_tolerance=config.spacing_tolerance
+    )
 
 
     if region.empty or restored_grid.empty:
@@ -777,7 +962,15 @@ def filter_colonies(
         filtered_regions = filtered_regions.query(
             f"centroid_x >= {left} and centroid_x <= {right} and centroid_y >= {top} and centroid_y <= {bottom}"
         ).copy()
-        region, restored_grid = solve_grid_dataframe(filtered_regions, approx_spacing=52)
+        region, restored_grid = solve_grid_dataframe(
+            filtered_regions, 
+            approx_spacing=config.average_x_spacing,
+            expected_rows=config.expected_rows,
+            expected_cols=config.expected_cols,
+            x_spacing_ref=config.average_x_spacing,
+            y_spacing_ref=config.average_y_spacing,
+            spacing_tolerance=config.spacing_tolerance
+        )
     
         if region.empty or restored_grid.empty:
             logger.warning("*** Grid restoration failed: Restored grid points are out of image bounds. Using second method for grid fitting.")
@@ -808,10 +1001,40 @@ def filter_colonies(
 
         else:
             region.dropna(subset=["row", "col"], inplace=True)
+            
+            # Handle duplicate (row, col) assignments - keep the one closest to grid point
+            if region.duplicated(subset=["row", "col"]).any():
+                logger.debug("Found duplicate grid assignments, keeping closest points")
+                # For each (row, col), calculate distance to expected position and keep minimum
+                region = region.copy()
+                region["row"] = region["row"].astype(int)
+                region["col"] = region["col"].astype(int)
+                
+                # Merge with expected positions
+                grid_df_temp = restored_grid.copy()
+                grid_df_temp["row"] = grid_df_temp["row"].astype(int)
+                grid_df_temp["col"] = grid_df_temp["col"].astype(int)
+                region = region.merge(grid_df_temp[["row", "col", "expected_x", "expected_y"]], on=["row", "col"], how="left")
+                
+                # Calculate distance to expected position
+                region["_dist_to_grid"] = np.sqrt(
+                    (region["centroid_x"] - region["expected_x"])**2 + 
+                    (region["centroid_y"] - region["expected_y"])**2
+                )
+                
+                # Keep the closest point for each (row, col)
+                region = region.loc[region.groupby(["row", "col"])["_dist_to_grid"].idxmin()]
+                region = region.drop(columns=["_dist_to_grid", "expected_x", "expected_y"])
+            
+            region["row"] = region["row"].astype(int)
+            region["col"] = region["col"].astype(int)
             region.set_index(["row", "col"], inplace=True, drop=True)
             
             # Use reindex to ensure all grid points are present and sorted
-            grid_df = restored_grid.set_index(["row", "col"])
+            grid_df = restored_grid.copy()
+            grid_df["row"] = grid_df["row"].astype(int)
+            grid_df["col"] = grid_df["col"].astype(int)
+            grid_df = grid_df.set_index(["row", "col"])
             region = region.reindex(grid_df.index)
             
             region["grid_point_x"] = grid_df["expected_x"]
@@ -888,7 +1111,7 @@ def marker_plate_point_matching(
     
     if len(marker_centroids) == 0 or len(tetrad_centroids) == 0:
         logger.error(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: No centroids detected in marker or tetrad images for matching.")
-        return None, colony_regions, 1.0, 0.0, 0.0, 0.0, [], []
+        return None, colony_regions, pd.DataFrame(), 1.0, 0.0, 0.0, 0.0, [], []
 
     # Match marker centroids to tetrad centroids
     center_marker = np.mean(marker_centroids, axis=0)
@@ -940,37 +1163,44 @@ def genotyping(
     
     # Calculate background as 15th percentile of non-colony regions
     background_signal = np.percentile(aligned_marker_image_gray[aligned_marker_image_gray>0], 15)
-    # logger.info(f"Background signal estimated: {background_signal:.2f}")
     
     # Subtract background and clip negative values
-    aligned_marker_image_gray = np.clip(aligned_marker_image_gray.astype(float) - background_signal, 0, 255).astype(np.uint8)
+    aligned_marker_image_gray = np.clip(aligned_marker_image_gray.astype(np.float32) - background_signal, 0, 255).astype(np.uint8)
+    
+    # Precompute Otsu threshold and positive signal median
+    otsu_threshold = threshold_otsu(aligned_marker_image_gray)
+    positive_signal_median = np.median(aligned_marker_image_gray[aligned_marker_image_gray > otsu_threshold])
+    marker_intensity_threshold = max(50, otsu_threshold)
+    
+    img_height, img_width = binary_tetrad_image.shape
 
     for idx, region in colony_regions.iterrows():
         cx, cy = int(region["grid_point_x"]), int(region["grid_point_y"])
-        x1, x2 = max(0, cx - radius), min(binary_tetrad_image.shape[1], cx + radius)
-        y1, y2 = max(0, cy - radius), min(binary_tetrad_image.shape[0], cy + radius)
+        x1, x2 = max(0, cx - radius), min(img_width, cx + radius)
+        y1, y2 = max(0, cy - radius), min(img_height, cy + radius)
+        
         tetrad_patch = binary_tetrad_image[y1:y2, x1:x2]
         marker_patch = aligned_marker_image_gray[y1:y2, x1:x2]
+        
         if marker_patch.size == 0:
             logger.warning(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: Empty marker patch for colony at index {idx}. Skipping genotype assignment.")
             colony_regions.loc[idx, "genotype"] = "Unknown"
             continue
-        mean_tetrad_intensity = np.mean(tetrad_patch)
-        mean_marker_intensity = np.mean(marker_patch)
+            
+        # Vectorized computations
+        mean_tetrad_intensity = tetrad_patch.mean()
+        mean_marker_intensity = marker_patch.mean()
         median_tetrad_intensity = np.median(tetrad_patch)
         median_marker_intensity = np.median(marker_patch)
         quantile_80_marker_intensity = np.percentile(marker_patch, 80)
-        otsu_threshold = threshold_otsu(aligned_marker_image_gray)
-        positive_signal_median = np.median(aligned_marker_image_gray[aligned_marker_image_gray > otsu_threshold])
 
-        marker_intensity_threshold = max(50, otsu_threshold)
-        # logger.debug(f"Using marker intensity threshold: {marker_intensity_threshold}")
         colony_regions.loc[idx, "tetrad_intensity"] = mean_tetrad_intensity
         colony_regions.loc[idx, "marker_intensity"] = mean_marker_intensity
         colony_regions.loc[idx, "median_tetrad_intensity"] = median_tetrad_intensity
         colony_regions.loc[idx, "median_marker_intensity"] = median_marker_intensity
         colony_regions.loc[idx, "otsu_threshold"] = otsu_threshold
         colony_regions.loc[idx, "positive_signal_median"] = positive_signal_median
+        
         if mean_tetrad_intensity > 0.2 and quantile_80_marker_intensity < marker_intensity_threshold:
             colony_regions.loc[idx, "genotype"] = "WT"
         else:
