@@ -830,6 +830,69 @@ def solve_grid_dataframe(
             
             logger.info(f"Grid corrected: reassigned points after detecting column density anomaly")
     
+    # ---------------- 9.7 Boundary constraint validation ----------------
+    # Check if the grid extends too far beyond the actual point range
+    # This catches cases where the grid is shifted but all points still get assigned
+    assigned_mask = ~df['row'].isna() & ~df['col'].isna()
+    if assigned_mask.sum() >= 6:
+        # Get the actual X range of assigned points
+        assigned_x = df.loc[assigned_mask, 'centroid_x'].values
+        actual_x_min = np.min(assigned_x)
+        actual_x_max = np.max(assigned_x)
+        
+        # Get the expected X range from the grid
+        expected_x_min = O_fit[0]  # Column 0
+        expected_x_max = O_fit[0] + (expected_cols - 1) * u_fit[0]  # Column 11
+        
+        # Calculate how far the grid extends beyond actual points
+        left_overhang = actual_x_min - expected_x_min  # Positive if grid extends left of points
+        right_overhang = expected_x_max - actual_x_max  # Positive if grid extends right of points
+        
+        col_shift = 0
+        # If grid extends too far to the left (column 0 is way left of actual points)
+        # and not enough to the right, we may need to shift right
+        if left_overhang > u_spacing * 0.6 and right_overhang < u_spacing * 0.3:
+            col_shift = -1
+            logger.warning(f"Boundary validation: grid extends {left_overhang:.1f}px left of points, shifting left")
+        # If grid extends too far to the right and not enough to the left
+        elif right_overhang > u_spacing * 0.6 and left_overhang < u_spacing * 0.3:
+            col_shift = 1
+            logger.warning(f"Boundary validation: grid extends {right_overhang:.1f}px right of points, shifting right")
+        
+        if col_shift != 0:
+            # Adjust the origin
+            O_fit = O_fit - col_shift * u_fit
+            
+            # Regenerate ideal grid
+            ideal_data = []
+            for r in range(expected_rows):
+                for c in range(expected_cols):
+                    pt = O_fit + c * u_fit + r * v_fit
+                    ideal_data.append({
+                        'row': r, 
+                        'col': c, 
+                        'expected_x': pt[0], 
+                        'expected_y': pt[1]
+                    })
+            ideal_df = pd.DataFrame(ideal_data)
+            
+            # Re-assign all points
+            ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+            for idx in df.index:
+                pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+                distances = np.linalg.norm(ideal_grid - pt, axis=1)
+                min_idx = np.argmin(distances)
+                min_dist = distances[min_idx]
+                
+                if min_dist < approx_spacing * 1.5:
+                    df.at[idx, 'row'] = ideal_df.at[min_idx, 'row']
+                    df.at[idx, 'col'] = ideal_df.at[min_idx, 'col']
+                else:
+                    df.at[idx, 'row'] = np.nan
+                    df.at[idx, 'col'] = np.nan
+            
+            logger.info(f"Grid corrected: reassigned points after boundary validation")
+    
     return df, ideal_df
 
 # %% =========================== Functions =============================
@@ -892,6 +955,9 @@ def binarize_image(
         # Use Otsu's method to determine threshold
         thresh = threshold_otsu(blur)
         binary = blur > thresh
+    
+    # fill small holes
+    binary = ndi.binary_fill_holes(binary)
 
     return binary
 
@@ -1281,8 +1347,19 @@ def filter_colonies(
     binary_image: np.ndarray,
     colony_regions: pd.DataFrame,
     config: Configuration,
-    is_marker: bool = False
+    is_marker: bool = False,
+    reference_grid: pd.DataFrame | None = None
 ) -> pd.DataFrame:
+    """
+    Filter colonies and fit grid.
+    
+    Args:
+        binary_image: Binary image of colonies
+        colony_regions: DataFrame with detected colony regions
+        config: Configuration object
+        is_marker: Whether this is a marker plate image
+        reference_grid: Optional reference grid from tetrad image (used for marker plates)
+    """
     
     h, w = binary_image.shape
 
@@ -1310,6 +1387,37 @@ def filter_colonies(
         y_spacing_ref=config.average_y_spacing,
         spacing_tolerance=config.spacing_tolerance
     )
+
+    # For marker images: if grid fitting fails badly, use reference grid from tetrad
+    if is_marker and reference_grid is not None:
+        # Check if current grid is reasonable by comparing coverage
+        assigned_count = (~region['row'].isna()).sum() if not region.empty else 0
+        total_points = len(filtered_regions)
+        coverage = assigned_count / max(total_points, 1)
+        
+        # If coverage is too low (< 50%), use reference grid directly
+        if coverage < 0.5 or region.empty or restored_grid.empty:
+            logger.warning(f"Marker grid fitting poor (coverage={coverage:.2f}), using tetrad reference grid")
+            # Use reference grid to assign points
+            ref_grid_points = reference_grid[['expected_x', 'expected_y']].values
+            ref_grid_positions = reference_grid[['row', 'col']].values
+            
+            for idx in filtered_regions.index:
+                pt = np.array([filtered_regions.at[idx, 'centroid_x'], filtered_regions.at[idx, 'centroid_y']])
+                distances = np.linalg.norm(ref_grid_points - pt, axis=1)
+                min_idx = np.argmin(distances)
+                min_dist = distances[min_idx]
+                
+                # Use larger threshold for marker (colonies may have shifted)
+                if min_dist < config.average_x_spacing * 2.5:
+                    filtered_regions.at[idx, 'row'] = ref_grid_positions[min_idx, 0]
+                    filtered_regions.at[idx, 'col'] = ref_grid_positions[min_idx, 1]
+                else:
+                    filtered_regions.at[idx, 'row'] = np.nan
+                    filtered_regions.at[idx, 'col'] = np.nan
+            
+            region = filtered_regions
+            restored_grid = reference_grid.copy()
 
 
     if region.empty or restored_grid.empty:
@@ -1453,11 +1561,26 @@ def marker_plate_point_matching(
         marker_fill = marker_dilate
     marker_erode = apply_morphology(marker_fill, disk_size=3, operation="erode")
     marker_regions = detect_colonies(marker_erode, segmentation=True, min_distance=config.hyg_segmentation_min_distance)
+    
+    # Create reference grid from tetrad colony_regions for marker grid fitting
+    # This helps when marker colonies are merged/irregular
+    reference_grid = None
+    if 'grid_point_x' in colony_regions.columns and 'grid_point_y' in colony_regions.columns:
+        # Extract grid information from tetrad results
+        tetrad_grid_info = colony_regions[['grid_point_x', 'grid_point_y']].dropna()
+        if len(tetrad_grid_info) > 0:
+            # Reset index to get row/col as columns
+            tetrad_with_index = colony_regions.reset_index()
+            if 'row' in tetrad_with_index.columns and 'col' in tetrad_with_index.columns:
+                reference_grid = tetrad_with_index[['row', 'col', 'grid_point_x', 'grid_point_y']].dropna()
+                reference_grid = reference_grid.rename(columns={'grid_point_x': 'expected_x', 'grid_point_y': 'expected_y'})
+    
     marker_regions = filter_colonies(
         marker_erode,
         marker_regions,
         config,
-        is_marker=True
+        is_marker=True,
+        reference_grid=reference_grid
     )
     # marker_centroids = marker_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
     # tetrad_centroids = colony_regions[["centroid_x", "centroid_y"]].dropna().to_numpy()
@@ -1571,7 +1694,7 @@ def genotyping_by_colony_size(
 ) -> pd.DataFrame:
     """Genotype colonies based on colony size per column."""
     colony_regions = colony_regions.copy()
-    colony_regions["genotype"] = "Unknown"
+    colony_regions["genotype"] = "Deletion"
     for col, col_data in colony_regions.groupby("col"):
         if col_data.shape[0] == 0:
             continue
@@ -1705,8 +1828,10 @@ def genotyping_pipeline(
             expected_cols=colony_columns
         )
 
+    first_day = min(config.tetrad_image_paths.keys())
     last_day = max(config.tetrad_image_paths.keys())
     day_colonies = {}
+    first_day_colony_regions = None
     last_day_binary = None
     last_day_colony_regions = None
     for day, day_image_path in config.tetrad_image_paths.items():
@@ -1719,16 +1844,18 @@ def genotyping_pipeline(
             config,
             image_notes=day_colonies[day]["image_notes"]
         )
+        if day == first_day:
+            first_day_colony_regions = day_colonies[day]["table"]
         if day == last_day and last_day_binary is None and last_day_colony_regions is None:
             last_day_binary = day_colonies[day]["binary_image"]
             last_day_colony_regions = day_colonies[day]["table"]
         day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
     
-    if last_day_binary is None or last_day_colony_regions is None:
+    if last_day_binary is None or last_day_colony_regions is None or first_day_colony_regions is None:
         raise ValueError("No tetrad images were processed.")
 
     if config.marker_image_path is None:
-        genotyping_colony_regions = genotyping_by_colony_size(last_day_colony_regions)
+        genotyping_colony_regions = genotyping_by_colony_size(first_day_colony_regions)
         all_colony_regions = pd.concat(
             [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype"]]],
             axis=1
@@ -1815,18 +1942,18 @@ if __name__ == "__main__":
 # %% =========================== Manual Run ================================
 
 # tetrad_image_paths={
-#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/3d/99_any1_3d_#3_202411.cropped.png"),
-#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/4d/99_any1_4d_#3_202411.cropped.png"),
-#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/5d/99_any1_5d_#3_202411.cropped.png"),
-#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/6d/99_any1_6d_#3_202411.cropped.png")
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/3d/201_alm1_3d_#3_202503.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/4d/201_alm1_4d_#3_202503.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/5d/201_alm1_5d_#3_202503.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/6d/201_alm1_6d_#3_202503.cropped.png")
 # }
-# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
+# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/replica/201_alm1_HYG_#3_202503.cropped.png")
 
 # tetrad_image_paths={
-#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/3d/353_elp3_3d_#1_202303.cropped.png"),
-#     # 4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/4d/353_elp3_4d_#1_202303.cropped.png"),
-#     # 5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/5d/353_elp3_5d_#1_202303.cropped.png"),
-#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/6d/353_elp3_6d_#1_202303.cropped.png")
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/3d/201_alm1_3d_#3_202503.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/4d/201_alm1_4d_#3_202503.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/5d/201_alm1_5d_#3_202503.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/16th_round/6d/201_alm1_6d_#3_202503.cropped.png")
 # }
 # marker_image_path=None
 
@@ -1878,7 +2005,7 @@ if __name__ == "__main__":
 #     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
 #     axis=1
 # ).sort_index(level=[1,0], axis=0)
-# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
+# fig = plot_genotype_results(day_colonies, all_colony_regions, radius=config.signal_detection_radius, aligned_marker_image=marker_aligned, marker_plate_image=marker_plate_image, marker_regions=marker_regions)
 
 # # %%
 # image = io.imread(tetrad_image_paths[3])
