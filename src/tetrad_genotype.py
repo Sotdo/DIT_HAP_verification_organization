@@ -230,11 +230,12 @@ def solve_grid_dataframe(
             row_min, row_max = logical_rows.min(), logical_rows.max()
             
             # Search for the best window position
+            # Expand search range by ±1 to allow for grid shifts
             best_window_score = -1
             best_window_offset = (0, 0)
             
-            for c_start in range(col_min - expected_cols + 1, col_max + 1):
-                for r_start in range(row_min - expected_rows + 1, row_max + 1):
+            for c_start in range(col_min - expected_cols, col_max + 2):
+                for r_start in range(row_min - expected_rows, row_max + 2):
                     in_window = (
                         (logical_cols >= c_start) & (logical_cols < c_start + expected_cols) &
                         (logical_rows >= r_start) & (logical_rows < r_start + expected_rows)
@@ -399,6 +400,7 @@ def solve_grid_dataframe(
         residual_threshold = max(residual_threshold, approx_spacing * 0.3)
         
         A_clean, b_clean = [], []
+        outlier_indices = []
         for i, (idx, (c, r)) in enumerate(temp_mapping.items()):
             if point_residuals[i] < residual_threshold:
                 A_clean.append([1, 0, c, 0, r, 0])
@@ -406,8 +408,8 @@ def solve_grid_dataframe(
                 A_clean.append([0, 1, 0, c, 0, r])
                 b_clean.append(points[idx][1])
             else:
-                df.at[df.index[idx], 'row'] = np.nan
-                df.at[df.index[idx], 'col'] = np.nan
+                # Don't discard outliers yet, just track them
+                outlier_indices.append((idx, c, r))
         
         if len(A_clean) >= 8:
             A = np.array(A_clean)
@@ -472,6 +474,290 @@ def solve_grid_dataframe(
                 'expected_y': pt[1]
             })
     ideal_df = pd.DataFrame(ideal_data)
+    
+    # ---------------- 8.5 Detect and correct systematic column offset ----------------
+    # Check if there's a systematic offset suggesting the grid is shifted by one column
+    # This can happen when edge colonies are missing, causing RANSAC to mis-align
+    
+    assigned_mask = ~df['row'].isna() & ~df['col'].isna()
+    if assigned_mask.sum() >= 6:
+        assigned_indices = df.index[assigned_mask].tolist()
+        
+        # Calculate the offset from each point to its assigned grid position
+        x_offsets = []
+        for idx in assigned_indices:
+            pt_x = df.at[idx, 'centroid_x']
+            r, c = int(df.at[idx, 'row']), int(df.at[idx, 'col'])
+            expected_x = O_fit[0] + c * u_fit[0] + r * v_fit[0]
+            x_offsets.append(pt_x - expected_x)
+        
+        x_offsets = np.array(x_offsets)
+        median_x_offset = np.median(x_offsets)
+        u_spacing = np.linalg.norm(u_fit)
+        
+        # If median offset is close to ±1 column spacing, the grid is likely shifted
+        # Use 0.35 * spacing as threshold (more sensitive to catch subtle shifts)
+        col_shift = 0
+        if median_x_offset > 0.35 * u_spacing:
+            # Points are systematically to the RIGHT of their grid positions
+            # This means grid is shifted too far LEFT, need to shift columns by -1
+            col_shift = -1
+        elif median_x_offset < -0.35 * u_spacing:
+            # Points are systematically to the LEFT of their grid positions  
+            # This means grid is shifted too far RIGHT, need to shift columns by +1
+            col_shift = 1
+        
+        if col_shift != 0:
+            logger.info(f"Detected systematic column offset (median_x_offset={median_x_offset:.2f}, u_spacing={u_spacing:.2f}), shifting columns by {col_shift}")
+            
+            # Adjust the origin to compensate
+            O_fit = O_fit - col_shift * u_fit
+            
+            # Regenerate ideal grid with corrected origin
+            ideal_data = []
+            for r in range(expected_rows):
+                for c in range(expected_cols):
+                    pt = O_fit + c * u_fit + r * v_fit
+                    ideal_data.append({
+                        'row': r, 
+                        'col': c, 
+                        'expected_x': pt[0], 
+                        'expected_y': pt[1]
+                    })
+            ideal_df = pd.DataFrame(ideal_data)
+            
+            # Re-assign all points to nearest grid position after correction
+            ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+            
+            for idx in df.index:
+                pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+                distances = np.linalg.norm(ideal_grid - pt, axis=1)
+                min_idx = np.argmin(distances)
+                min_dist = distances[min_idx]
+                
+                if min_dist < approx_spacing * 1.5:
+                    df.at[idx, 'row'] = ideal_df.at[min_idx, 'row']
+                    df.at[idx, 'col'] = ideal_df.at[min_idx, 'col']
+                else:
+                    df.at[idx, 'row'] = np.nan
+                    df.at[idx, 'col'] = np.nan
+    
+    # ---------------- 8.6 Detect missing column among unassigned points ----------------
+    # Check if there's a column of regular points that were missed
+    # Lowered threshold to detect even partially missing columns (>= 2 points)
+    unassigned_mask = df['row'].isna()
+    if unassigned_mask.sum() >= 2:
+        unassigned_indices = df.index[unassigned_mask].tolist()
+        unassigned_points = np.array([[df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']] 
+                                      for idx in unassigned_indices])
+        
+        # Cluster unassigned points by X coordinate (column direction)
+        if len(unassigned_points) >= 2:
+            x_coords = unassigned_points[:, 0]
+            # Use u_spacing to group points into potential columns
+            x_sorted_indices = np.argsort(x_coords)
+            
+            # Find columns with at least 2 points (lowered from expected_rows)
+            potential_columns = []
+            i = 0
+            while i < len(x_sorted_indices):
+                col_group = [x_sorted_indices[i]]
+                j = i + 1
+                while j < len(x_sorted_indices) and \
+                      abs(x_coords[x_sorted_indices[j]] - x_coords[x_sorted_indices[i]]) < u_spacing * 0.4:
+                    col_group.append(x_sorted_indices[j])
+                    j += 1
+                
+                if len(col_group) >= 2:
+                    # Check if Y coordinates are regularly spaced
+                    y_coords = unassigned_points[col_group, 1]
+                    y_sorted = np.sort(y_coords)
+                    y_diffs = np.diff(y_sorted)
+                    
+                    # If Y spacing is regular, this is likely a missed column
+                    is_regular = False
+                    if len(col_group) >= 3:
+                        # For 3+ points, check if each interval is close to n * v_spacing (n = 1, 2, or 3)
+                        # This handles non-consecutive rows better than standard deviation
+                        all_valid = True
+                        for diff in y_diffs:
+                            # Check if this diff matches any multiplier of v_spacing
+                            valid_diff = False
+                            for multiplier in [1, 2, 3]:
+                                if abs(diff - multiplier * v_spacing) < v_spacing * 0.4:
+                                    valid_diff = True
+                                    break
+                            if not valid_diff:
+                                all_valid = False
+                                break
+                        is_regular = all_valid
+                    elif len(col_group) == 2:
+                        # For 2 points, check if distance is close to n * v_spacing (n = 1, 2, or 3)
+                        # This handles cases where points are not in adjacent rows
+                        dist = y_diffs[0]
+                        for multiplier in [1, 2, 3]:
+                            if abs(dist - multiplier * v_spacing) < v_spacing * 0.4:
+                                is_regular = True
+                                break
+                    
+                    if is_regular:
+                        potential_columns.append(col_group)
+                        logger.info(f"Found potential missed column with {len(col_group)} regular points")
+                
+                i = j
+            
+            # If we found a regular column, the grid is likely shifted
+            if potential_columns:
+                # Calculate the X position of this missed column
+                missed_col_x = np.median([x_coords[idx] for idx in potential_columns[0]])
+                
+                # Determine which direction to shift
+                # Compare with the leftmost and rightmost expected columns
+                leftmost_expected_x = O_fit[0]
+                rightmost_expected_x = O_fit[0] + (expected_cols - 1) * u_fit[0]
+                
+                col_shift = 0
+                if missed_col_x < leftmost_expected_x - u_spacing * 0.3:
+                    # Missed column is to the left, shift grid left
+                    col_shift = 1
+                elif missed_col_x > rightmost_expected_x + u_spacing * 0.3:
+                    # Missed column is to the right, shift grid right
+                    col_shift = -1
+                
+                if col_shift != 0:
+                    logger.info(f"Detected missed regular column (x={missed_col_x:.1f}), shifting grid by {col_shift} columns")
+                    
+                    # Adjust the origin
+                    O_fit = O_fit - col_shift * u_fit
+                    
+                    # Regenerate ideal grid
+                    ideal_data = []
+                    for r in range(expected_rows):
+                        for c in range(expected_cols):
+                            pt = O_fit + c * u_fit + r * v_fit
+                            ideal_data.append({
+                                'row': r, 
+                                'col': c, 
+                                'expected_x': pt[0], 
+                                'expected_y': pt[1]
+                            })
+                    ideal_df = pd.DataFrame(ideal_data)
+                    
+                    # Re-assign all points
+                    ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+                    for idx in df.index:
+                        pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+                        distances = np.linalg.norm(ideal_grid - pt, axis=1)
+                        min_idx = np.argmin(distances)
+                        min_dist = distances[min_idx]
+                        
+                        if min_dist < approx_spacing * 1.5:
+                            df.at[idx, 'row'] = ideal_df.at[min_idx, 'row']
+                            df.at[idx, 'col'] = ideal_df.at[min_idx, 'col']
+                        else:
+                            df.at[idx, 'row'] = np.nan
+                            df.at[idx, 'col'] = np.nan
+    
+    # ---------------- 9. Reassign points outside window to nearest grid point ----------------
+    # For points that weren't assigned to the grid, find their nearest grid position
+    unassigned_mask = df['row'].isna()
+    if unassigned_mask.any():
+        unassigned_indices = df.index[unassigned_mask].tolist()
+        
+        # Create ideal grid array for vectorized distance calculation
+        ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+        
+        # Calculate distance to all ideal grid points
+        for idx in unassigned_indices:
+            # Get point coordinates
+            pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+            
+            # Vectorized distance calculation
+            distances = np.linalg.norm(ideal_grid - pt, axis=1)
+            
+            # Find nearest grid point
+            min_idx = np.argmin(distances)
+            min_dist = distances[min_idx]
+            nearest_row = ideal_df.at[min_idx, 'row']
+            nearest_col = ideal_df.at[min_idx, 'col']
+            
+            # Only assign if distance is reasonable (within 2x approx_spacing)
+            if min_dist < approx_spacing * 2.0:
+                df.at[idx, 'row'] = nearest_row
+                df.at[idx, 'col'] = nearest_col
+                logger.debug(f"Reassigned outlier point (label={df.at[idx, 'label']}) to grid position ({nearest_row}, {nearest_col}), distance: {min_dist:.2f}")
+    
+    # ---------------- 9.5 Final validation: detect empty columns ----------------
+    # Check if there are columns with no assigned points while there are unassigned points
+    # This indicates a potential grid shift error
+    assigned_mask = ~df['row'].isna() & ~df['col'].isna()
+    if assigned_mask.sum() >= 4 and (~assigned_mask).sum() >= 2:
+        # Count how many points are assigned to each column
+        assigned_cols = df.loc[assigned_mask, 'col'].astype(int)
+        col_counts = np.bincount(assigned_cols, minlength=expected_cols)
+        
+        # Find empty columns (columns with 0 points)
+        empty_cols = np.where(col_counts == 0)[0]
+        
+        if len(empty_cols) > 0:
+            # Check if all empty columns are at edges (first or last column)
+            edge_empty = all(c == 0 or c == expected_cols - 1 for c in empty_cols)
+            
+            if edge_empty and len(empty_cols) <= 2:
+                # Get unassigned points
+                unassigned_indices = df.index[~assigned_mask].tolist()
+                unassigned_points = np.array([[df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']] 
+                                              for idx in unassigned_indices])
+                
+                if len(unassigned_points) >= 2:
+                    # Calculate which direction the unassigned points are
+                    unassigned_x = np.median(unassigned_points[:, 0])
+                    assigned_x = np.median([df.at[idx, 'centroid_x'] for idx in df.index[assigned_mask]])
+                    
+                    # Determine shift direction
+                    col_shift = 0
+                    if 0 in empty_cols and unassigned_x < assigned_x:
+                        # Empty at left, unassigned points are to the left -> shift right
+                        col_shift = 1
+                        logger.warning(f"Detected empty column 0 with {len(unassigned_points)} unassigned points to the left, correcting grid")
+                    elif (expected_cols - 1) in empty_cols and unassigned_x > assigned_x:
+                        # Empty at right, unassigned points are to the right -> shift left
+                        col_shift = -1
+                        logger.warning(f"Detected empty column {expected_cols-1} with {len(unassigned_points)} unassigned points to the right, correcting grid")
+                    
+                    if col_shift != 0:
+                        # Adjust the origin
+                        O_fit = O_fit - col_shift * u_fit
+                        
+                        # Regenerate ideal grid
+                        ideal_data = []
+                        for r in range(expected_rows):
+                            for c in range(expected_cols):
+                                pt = O_fit + c * u_fit + r * v_fit
+                                ideal_data.append({
+                                    'row': r, 
+                                    'col': c, 
+                                    'expected_x': pt[0], 
+                                    'expected_y': pt[1]
+                                })
+                        ideal_df = pd.DataFrame(ideal_data)
+                        
+                        # Re-assign all points
+                        ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+                        for idx in df.index:
+                            pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+                            distances = np.linalg.norm(ideal_grid - pt, axis=1)
+                            min_idx = np.argmin(distances)
+                            min_dist = distances[min_idx]
+                            
+                            if min_dist < approx_spacing * 1.5:
+                                df.at[idx, 'row'] = ideal_df.at[min_idx, 'row']
+                                df.at[idx, 'col'] = ideal_df.at[min_idx, 'col']
+                            else:
+                                df.at[idx, 'row'] = np.nan
+                                df.at[idx, 'col'] = np.nan
+                        
+                        logger.info(f"Grid corrected: reassigned points after detecting empty edge column")
     
     return df, ideal_df
 
@@ -1047,7 +1333,7 @@ def colony_grid_table(
     image: np.ndarray,
     config: Configuration,
     image_notes: tuple | None = None
-) -> tuple[np.ndarray, pd.DataFrame, np.ndarray]:
+) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame, np.ndarray]:
     """Create a grid table of colonies."""
 
     # Binarize image
@@ -1072,7 +1358,7 @@ def colony_grid_table(
 
     grid = filtered_regions[["grid_point_x", "grid_point_y"]].to_numpy().reshape(config.expected_rows, config.expected_cols, 2)
 
-    return binary_image, filtered_regions, grid
+    return binary_image, detected_regions, filtered_regions, grid
 
 @logger.catch
 def marker_plate_point_matching(
@@ -1111,11 +1397,7 @@ def marker_plate_point_matching(
     
     if len(marker_centroids) == 0 or len(tetrad_centroids) == 0:
         logger.error(f"*** {' '.join(map(str, image_notes)) if image_notes else ''}: No centroids detected in marker or tetrad images for matching.")
-<<<<<<< HEAD
         return None, colony_regions, marker_regions, 1.0, 0.0, 0.0, 0.0, [], []
-=======
-        return None, colony_regions, pd.DataFrame(), 1.0, 0.0, 0.0, 0.0, [], []
->>>>>>> optimize_speed
 
     # Match marker centroids to tetrad centroids
     center_marker = np.mean(marker_centroids, axis=0)
@@ -1430,75 +1712,75 @@ if __name__ == "__main__":
 # }
 # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
 
-# tetrad_image_paths={
-#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/3d/68_npr2_3d_#2_202411.cropped.png"),
-#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/4d/68_npr2_4d_#2_202411.cropped.png"),
-#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/5d/68_npr2_5d_#2_202411.cropped.png"),
-#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/6d/68_npr2_6d_#2_202411.cropped.png")
-# }
-# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/4th_round/replica/68_npr2_HYG_#2_202411.cropped.png")
+tetrad_image_paths={
+    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/3d/78_SPAC607.02c_3d_#2_202412.cropped.png"),
+    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/4d/78_SPAC607.02c_4d_#2_202412.cropped.png"),
+    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/5d/78_SPAC607.02c_5d_#2_202412.cropped.png"),
+    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/6d/78_SPAC607.02c_6d_#2_202412.cropped.png")
+}
+marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/replica/78_SPAC607.02c_HYG_#2_202412.cropped.png")
 
-# config = Configuration(
-#     tetrad_image_paths=tetrad_image_paths,
-#     marker_image_path=marker_image_path
-# )
+config = Configuration(
+    tetrad_image_paths=tetrad_image_paths,
+    marker_image_path=marker_image_path
+)
 
-# last_day = max(config.tetrad_image_paths.keys())
-# day_colonies = {}
-# last_day_binary = None
-# last_day_colony_regions = None
+last_day = max(config.tetrad_image_paths.keys())
+day_colonies = {}
+last_day_binary = None
+last_day_colony_regions = None
 
-# # %%
-# for day, day_image_path in config.tetrad_image_paths.items():
-#     day_colonies[day] = {}
-#     image = io.imread(day_image_path)
-#     day_colonies[day]["image"] = image
-#     day_colonies[day]["image_notes"] = (day_image_path.stem, day)
-#     day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
-#         image,
-#         config,
-#         day_colonies[day]["image_notes"]
-#     )
-#     if day == last_day and last_day_binary is None and last_day_colony_regions is None:
-#         last_day_binary = day_colonies[day]["binary_image"]
-#         last_day_colony_regions = day_colonies[day]["table"]
-#     day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
+# %%
+for day, day_image_path in config.tetrad_image_paths.items():
+    day_colonies[day] = {}
+    image = io.imread(day_image_path)
+    day_colonies[day]["image"] = image
+    day_colonies[day]["image_notes"] = (day_image_path.stem, day)
+    day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
+        image,
+        config,
+        day_colonies[day]["image_notes"]
+    )
+    if day == last_day and last_day_binary is None and last_day_colony_regions is None:
+        last_day_binary = day_colonies[day]["binary_image"]
+        last_day_colony_regions = day_colonies[day]["table"]
+    day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
 
-# if last_day_binary is None or last_day_colony_regions is None:
-#     raise ValueError("No tetrad images were processed.")
+if last_day_binary is None or last_day_colony_regions is None:
+    raise ValueError("No tetrad images were processed.")
 
-# # %%
-# marker_plate_image = io.imread(config.marker_image_path)
-# marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
-#     last_day_colony_regions,
-#     marker_plate_image,
-#     config
-# )
+# %%
+marker_plate_image = io.imread(config.marker_image_path)
+marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+    last_day_colony_regions,
+    marker_plate_image,
+    config
+)
 
-# # if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-# #     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
-# #     marker_aligned = marker_plate_image
+# if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+#     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
+#     marker_aligned = marker_plate_image
 
-# marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-# # %%
-# genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
-# all_colony_regions = pd.concat(
-#     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
-#     axis=1
-# ).sort_index(level=[1,0], axis=0)
-# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
+marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+# %%
+genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
+all_colony_regions = pd.concat(
+    [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
+    axis=1
+).sort_index(level=[1,0], axis=0)
+fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
 
-# # %%
-# image = io.imread(tetrad_image_paths[3])
+# %%
+image = io.imread(tetrad_image_paths[3])
 
-# binary_image = binarize_image(
-#         image,
-#         gray_method=config.tetrad_gray_method,
-#         sigma=config.tetrad_gaussian_sigma
-# )
+binary_image = binarize_image(
+        image,
+        gray_method=config.tetrad_gray_method,
+        sigma=config.tetrad_gaussian_sigma
+)
 
-# # Detect colonies
-# detected_regions = detect_colonies(
-#     binary_image
-# )
+# Detect colonies
+detected_regions = detect_colonies(
+    binary_image
+)
 # %%
