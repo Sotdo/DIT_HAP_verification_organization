@@ -496,13 +496,13 @@ def solve_grid_dataframe(
         u_spacing = np.linalg.norm(u_fit)
         
         # If median offset is close to ±1 column spacing, the grid is likely shifted
-        # Use 0.35 * spacing as threshold (more sensitive to catch subtle shifts)
+        # Use 0.3 * spacing as threshold (more sensitive to catch subtle shifts)
         col_shift = 0
-        if median_x_offset > 0.35 * u_spacing:
+        if median_x_offset > 0.3 * u_spacing:
             # Points are systematically to the RIGHT of their grid positions
             # This means grid is shifted too far LEFT, need to shift columns by -1
             col_shift = -1
-        elif median_x_offset < -0.35 * u_spacing:
+        elif median_x_offset < -0.3 * u_spacing:
             # Points are systematically to the LEFT of their grid positions  
             # This means grid is shifted too far RIGHT, need to shift columns by +1
             col_shift = 1
@@ -691,7 +691,7 @@ def solve_grid_dataframe(
     # Check if there are columns with no assigned points while there are unassigned points
     # This indicates a potential grid shift error
     assigned_mask = ~df['row'].isna() & ~df['col'].isna()
-    if assigned_mask.sum() >= 4 and (~assigned_mask).sum() >= 2:
+    if assigned_mask.sum() >= 3 and (~assigned_mask).sum() >= 2:
         # Count how many points are assigned to each column
         assigned_cols = df.loc[assigned_mask, 'col'].astype(int)
         col_counts = np.bincount(assigned_cols, minlength=expected_cols)
@@ -758,6 +758,77 @@ def solve_grid_dataframe(
                                 df.at[idx, 'col'] = np.nan
                         
                         logger.info(f"Grid corrected: reassigned points after detecting empty edge column")
+    
+    # ---------------- 9.6 Column density analysis for shift detection ----------------
+    # Check for characteristic pattern: edge column empty + adjacent column over-dense
+    # This is a strong indicator of 1-column shift
+    assigned_mask = ~df['row'].isna() & ~df['col'].isna()
+    if assigned_mask.sum() >= 4:
+        assigned_cols = df.loc[assigned_mask, 'col'].astype(int)
+        col_counts = np.bincount(assigned_cols, minlength=expected_cols)
+        
+        # Expected average points per column
+        total_assigned = assigned_mask.sum()
+        expected_per_col = total_assigned / expected_cols
+        
+        # Check for shift pattern
+        col_shift = 0
+        
+        # Left shift pattern: column 0 empty, column 1 has 2x expected density
+        if col_counts[0] == 0 and col_counts[1] >= expected_per_col * 1.5 and total_assigned >= expected_rows * 2:
+            # Verify there are unassigned points to the left
+            unassigned_indices = df.index[~assigned_mask].tolist()
+            if len(unassigned_indices) >= 2:
+                unassigned_x = [df.at[idx, 'centroid_x'] for idx in unassigned_indices]
+                assigned_x = [df.at[idx, 'centroid_x'] for idx in df.index[assigned_mask]]
+                if np.median(unassigned_x) < np.median(assigned_x):
+                    col_shift = 1
+                    logger.warning(f"Column density pattern detected: col 0 empty ({col_counts[0]}), col 1 over-dense ({col_counts[1]:.1f} vs {expected_per_col:.1f}), shifting right")
+        
+        # Right shift pattern: last column empty, second-to-last has 2x expected density
+        elif col_counts[-1] == 0 and col_counts[-2] >= expected_per_col * 1.5 and total_assigned >= expected_rows * 2:
+            # Verify there are unassigned points to the right
+            unassigned_indices = df.index[~assigned_mask].tolist()
+            if len(unassigned_indices) >= 2:
+                unassigned_x = [df.at[idx, 'centroid_x'] for idx in unassigned_indices]
+                assigned_x = [df.at[idx, 'centroid_x'] for idx in df.index[assigned_mask]]
+                if np.median(unassigned_x) > np.median(assigned_x):
+                    col_shift = -1
+                    logger.warning(f"Column density pattern detected: col {expected_cols-1} empty ({col_counts[-1]}), col {expected_cols-2} over-dense ({col_counts[-2]:.1f} vs {expected_per_col:.1f}), shifting left")
+        
+        if col_shift != 0:
+            # Adjust the origin
+            O_fit = O_fit - col_shift * u_fit
+            
+            # Regenerate ideal grid
+            ideal_data = []
+            for r in range(expected_rows):
+                for c in range(expected_cols):
+                    pt = O_fit + c * u_fit + r * v_fit
+                    ideal_data.append({
+                        'row': r, 
+                        'col': c, 
+                        'expected_x': pt[0], 
+                        'expected_y': pt[1]
+                    })
+            ideal_df = pd.DataFrame(ideal_data)
+            
+            # Re-assign all points
+            ideal_grid = np.column_stack([ideal_df['expected_x'].values, ideal_df['expected_y'].values])
+            for idx in df.index:
+                pt = np.array([df.at[idx, 'centroid_x'], df.at[idx, 'centroid_y']])
+                distances = np.linalg.norm(ideal_grid - pt, axis=1)
+                min_idx = np.argmin(distances)
+                min_dist = distances[min_idx]
+                
+                if min_dist < approx_spacing * 1.5:
+                    df.at[idx, 'row'] = ideal_df.at[min_idx, 'row']
+                    df.at[idx, 'col'] = ideal_df.at[min_idx, 'col']
+                else:
+                    df.at[idx, 'row'] = np.nan
+                    df.at[idx, 'col'] = np.nan
+            
+            logger.info(f"Grid corrected: reassigned points after detecting column density anomaly")
     
     return df, ideal_df
 
@@ -1495,19 +1566,39 @@ def genotyping(
     return colony_regions
 
 @logger.catch
+def genotyping_by_colony_size(
+    colony_regions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Genotype colonies based on colony size per column."""
+    colony_regions = colony_regions.copy()
+    colony_regions["genotype"] = "Unknown"
+    for col, col_data in colony_regions.groupby("col"):
+        if col_data.shape[0] == 0:
+            continue
+        median_area = col_data["area"].median()
+        for idx, region in col_data.iterrows():
+            if region["area"] >= 0.75 * median_area:
+                colony_regions.loc[idx, "genotype"] = "WT"
+            else:
+                colony_regions.loc[idx, "genotype"] = "Deletion"
+    return colony_regions
+
+@logger.catch
 def plot_genotype_results(
     tetrad_results: dict[int, dict],
-    aligned_marker_image: np.ndarray,
     colony_regions: pd.DataFrame,
-    marker_plate_image: np.ndarray,
-    marker_regions: pd.DataFrame,
-    radius: int = 15
+    radius: int = 15,
+    aligned_marker_image: np.ndarray | None = None,
+    marker_plate_image: np.ndarray | None = None,
+    marker_regions: pd.DataFrame | None = None,
 ):
     """Plot genotyping results with colony annotations."""
     n_days = len(tetrad_results)
     last_day = max(tetrad_results.keys())
-    n_cols = n_days + 1 + 2 + 1 + 1 # +1 for marker plate, +1 for colony area plot
-
+    if aligned_marker_image is None or marker_plate_image is None or marker_regions is None:
+        n_cols = n_days + 1 # +1 for colony area plot
+    else:
+        n_cols = n_days + 1 + 2 + 1 + 1 # +1 for marker plate, +1 for colony area plot
     fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 4))
     for day_idx, (day, day_data) in enumerate(sorted(tetrad_results.items())):
         ax = axes[day_idx]
@@ -1529,44 +1620,46 @@ def plot_genotype_results(
             color = 'green' if genotype == "WT" else 'red'
             square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
             ax.add_patch(square)
-    
-    axes[-5].imshow(marker_plate_image, rasterized=True)
-    axes[-5].set_title("Original Marker Plate")
-    axes[-5].axis('off')
-    for idx, region in marker_regions.iterrows():
-        cx, cy = region["grid_point_x"], region["grid_point_y"]
-        square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor='blue', facecolor='none', linewidth=2, alpha=0.4)
-        axes[-5].add_patch(square)
+    if aligned_marker_image is None or marker_plate_image is None or marker_regions is None:
+        pass
+    else:
+        axes[-5].imshow(marker_plate_image, rasterized=True)
+        axes[-5].set_title("Original Marker Plate")
+        axes[-5].axis('off')
+        for idx, region in marker_regions.iterrows():
+            cx, cy = region["grid_point_x"], region["grid_point_y"]
+            square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor='blue', facecolor='none', linewidth=2, alpha=0.4)
+            axes[-5].add_patch(square)
 
-    axes[-4].imshow(aligned_marker_image, rasterized=True)
-    axes[-4].set_title("Aligned Marker Plate")
-    axes[-4].axis('off')
-    for idx, region in colony_regions.iterrows():
-        cx, cy = region[f"grid_point_x_day{last_day}"], region[f"grid_point_y_day{last_day}"]
-        genotype = region["genotype"]
-        color = 'green' if genotype == "WT" else 'red'
-        square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
-        axes[-4].add_patch(square)
+        axes[-4].imshow(aligned_marker_image, rasterized=True)
+        axes[-4].set_title("Aligned Marker Plate")
+        axes[-4].axis('off')
+        for idx, region in colony_regions.iterrows():
+            cx, cy = region[f"grid_point_x_day{last_day}"], region[f"grid_point_y_day{last_day}"]
+            genotype = region["genotype"]
+            color = 'green' if genotype == "WT" else 'red'
+            square = Rectangle((cx - radius, cy - radius), 2*radius, 2*radius, edgecolor=color, facecolor='none', linewidth=2, alpha=0.4)
+            axes[-4].add_patch(square)
 
-    # remove background for better visualization
-    aligned_marker_image_gray = convert_to_grayscale(aligned_marker_image, channel=0)
-    background_signal = np.percentile(aligned_marker_image_gray[aligned_marker_image_gray>0], 15)
-    aligned_marker_image_gray2 = np.clip(aligned_marker_image_gray.astype(float) - background_signal, 0, 255).astype(np.uint8)
-    axes[-3].imshow(aligned_marker_image_gray2, cmap='gray', rasterized=True)
-    axes[-3].set_title("Background Subtracted Marker Plate")
-    axes[-3].axis('off')
+        # remove background for better visualization
+        aligned_marker_image_gray = convert_to_grayscale(aligned_marker_image, channel=0)
+        background_signal = np.percentile(aligned_marker_image_gray[aligned_marker_image_gray>0], 15)
+        aligned_marker_image_gray2 = np.clip(aligned_marker_image_gray.astype(float) - background_signal, 0, 255).astype(np.uint8)
+        axes[-3].imshow(aligned_marker_image_gray2, cmap='gray', rasterized=True)
+        axes[-3].set_title("Background Subtracted Marker Plate")
+        axes[-3].axis('off')
 
-    pixel_bins = np.arange(0, 256, 1)
-    axes[-2].hist(aligned_marker_image_gray.ravel(), bins=pixel_bins, color='blue', alpha=0.7)
-    axes[-2].hist(aligned_marker_image_gray2.ravel(), bins=pixel_bins, color='red', alpha=0.7)
-    otsu_thresh = threshold_otsu(aligned_marker_image_gray)
-    otsu_thresh2 = threshold_otsu(aligned_marker_image_gray2)
-    axes[-2].axvline(otsu_thresh, color='darkblue', linestyle='--', label='Otsu Threshold')
-    axes[-2].axvline(otsu_thresh2, color='darkred', linestyle='--', label='Otsu Threshold (BG Subtracted)')
-    axes[-2].set_title("Marker Plate Intensity Histogram")
-    axes[-2].set_xlabel("Intensity")
-    axes[-2].set_ylabel("Frequency")
-    axes[-2].set_xlim(0, 255)
+        pixel_bins = np.arange(0, 256, 1)
+        axes[-2].hist(aligned_marker_image_gray.ravel(), bins=pixel_bins, color='blue', alpha=0.7)
+        axes[-2].hist(aligned_marker_image_gray2.ravel(), bins=pixel_bins, color='red', alpha=0.7)
+        otsu_thresh = threshold_otsu(aligned_marker_image_gray)
+        otsu_thresh2 = threshold_otsu(aligned_marker_image_gray2)
+        axes[-2].axvline(otsu_thresh, color='darkblue', linestyle='--', label='Otsu Threshold')
+        axes[-2].axvline(otsu_thresh2, color='darkred', linestyle='--', label='Otsu Threshold (BG Subtracted)')
+        axes[-2].set_title("Marker Plate Intensity Histogram")
+        axes[-2].set_xlabel("Intensity")
+        axes[-2].set_ylabel("Frequency")
+        axes[-2].set_xlim(0, 255)
 
 
     # Colony area plot
@@ -1595,7 +1688,7 @@ def plot_genotype_results(
 @logger.catch
 def genotyping_pipeline(
     tetrad_image_paths: dict[int, Path],
-    marker_image_path: Path,
+    marker_image_path: Path | None = None,
     image_info: tuple | None = None,
     config: Configuration | None = None
 ) -> tuple[pd.DataFrame, Figure]:
@@ -1626,26 +1719,35 @@ def genotyping_pipeline(
     if last_day_binary is None or last_day_colony_regions is None:
         raise ValueError("No tetrad images were processed.")
 
-    marker_plate_image = io.imread(config.marker_image_path)
-    marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
-        last_day_colony_regions,
-        marker_plate_image,
-        config,
-        image_notes=image_info
-    )
+    if config.marker_image_path is None:
+        genotyping_colony_regions = genotyping_by_colony_size(last_day_colony_regions)
+        all_colony_regions = pd.concat(
+            [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype"]]],
+            axis=1
+        ).sort_index(level=[1,0], axis=0)
+        fig = plot_genotype_results(day_colonies, all_colony_regions, radius=config.signal_detection_radius)
+        return all_colony_regions, fig
+    else:
+        marker_plate_image = io.imread(config.marker_image_path)
+        marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+            last_day_colony_regions,
+            marker_plate_image,
+            config,
+            image_notes=image_info
+        )
 
-    if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-        logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
-        marker_aligned = marker_plate_image
+        if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+            logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
+            marker_aligned = marker_plate_image
 
-    marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-    genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius, image_notes=image_info)
-    all_colony_regions = pd.concat(
-        [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
-        axis=1
-    ).sort_index(level=[1,0], axis=0)
-    fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
-    return all_colony_regions, fig
+        marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+        genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius, image_notes=image_info)
+        all_colony_regions = pd.concat(
+            [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
+            axis=1
+        ).sort_index(level=[1,0], axis=0)
+        fig = plot_genotype_results(day_colonies, all_colony_regions, radius=config.signal_detection_radius, aligned_marker_image=marker_aligned, marker_plate_image=marker_plate_image, marker_regions=marker_regions)
+        return all_colony_regions, fig
 # %% =========================== Debug Functions =============================
 def plot_detected_colonies(
     binary_image: np.ndarray,
@@ -1712,75 +1814,75 @@ if __name__ == "__main__":
 # }
 # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
 
-# tetrad_image_paths={
-#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/3d/78_SPAC607.02c_3d_#2_202412.cropped.png"),
-#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/4d/78_SPAC607.02c_4d_#2_202412.cropped.png"),
-#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/5d/78_SPAC607.02c_5d_#2_202412.cropped.png"),
-#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/6d/78_SPAC607.02c_6d_#2_202412.cropped.png")
-# }
-# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/replica/78_SPAC607.02c_HYG_#2_202412.cropped.png")
+tetrad_image_paths={
+    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/3d/353_elp3_3d_#1_202303.cropped.png"),
+    # 4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/4d/353_elp3_4d_#1_202303.cropped.png"),
+    # 5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/5d/353_elp3_5d_#1_202303.cropped.png"),
+    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/22th_round/6d/353_elp3_6d_#1_202303.cropped.png")
+}
+marker_image_path=None
 
-# config = Configuration(
-#     tetrad_image_paths=tetrad_image_paths,
-#     marker_image_path=marker_image_path
-# )
+config = Configuration(
+    tetrad_image_paths=tetrad_image_paths,
+    marker_image_path=marker_image_path
+)
 
-# last_day = max(config.tetrad_image_paths.keys())
-# day_colonies = {}
-# last_day_binary = None
-# last_day_colony_regions = None
+last_day = max(config.tetrad_image_paths.keys())
+day_colonies = {}
+last_day_binary = None
+last_day_colony_regions = None
 
-# # %%
-# for day, day_image_path in config.tetrad_image_paths.items():
-#     day_colonies[day] = {}
-#     image = io.imread(day_image_path)
-#     day_colonies[day]["image"] = image
-#     day_colonies[day]["image_notes"] = (day_image_path.stem, day)
-#     day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
-#         image,
-#         config,
-#         day_colonies[day]["image_notes"]
-#     )
-#     if day == last_day and last_day_binary is None and last_day_colony_regions is None:
-#         last_day_binary = day_colonies[day]["binary_image"]
-#         last_day_colony_regions = day_colonies[day]["table"]
-#     day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
+# %%
+for day, day_image_path in config.tetrad_image_paths.items():
+    day_colonies[day] = {}
+    image = io.imread(day_image_path)
+    day_colonies[day]["image"] = image
+    day_colonies[day]["image_notes"] = (day_image_path.stem, day)
+    day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
+        image,
+        config,
+        day_colonies[day]["image_notes"]
+    )
+    if day == last_day and last_day_binary is None and last_day_colony_regions is None:
+        last_day_binary = day_colonies[day]["binary_image"]
+        last_day_colony_regions = day_colonies[day]["table"]
+    day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
 
-# if last_day_binary is None or last_day_colony_regions is None:
-#     raise ValueError("No tetrad images were processed.")
+if last_day_binary is None or last_day_colony_regions is None:
+    raise ValueError("No tetrad images were processed.")
 
-# # %%
-# marker_plate_image = io.imread(config.marker_image_path)
-# marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
-#     last_day_colony_regions,
-#     marker_plate_image,
-#     config
-# )
+# %%
+marker_plate_image = io.imread(config.marker_image_path)
+marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+    last_day_colony_regions,
+    marker_plate_image,
+    config
+)
 
-# # if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-# #     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
-# #     marker_aligned = marker_plate_image
+# if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+#     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
+#     marker_aligned = marker_plate_image
 
-# marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-# # %%
-# genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
-# all_colony_regions = pd.concat(
-#     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
-#     axis=1
-# ).sort_index(level=[1,0], axis=0)
-# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
+marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+# %%
+genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
+all_colony_regions = pd.concat(
+    [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
+    axis=1
+).sort_index(level=[1,0], axis=0)
+fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
 
-# # %%
-# image = io.imread(tetrad_image_paths[3])
+# %%
+image = io.imread(tetrad_image_paths[3])
 
-# binary_image = binarize_image(
-#         image,
-#         gray_method=config.tetrad_gray_method,
-#         sigma=config.tetrad_gaussian_sigma
-# )
+binary_image = binarize_image(
+        image,
+        gray_method=config.tetrad_gray_method,
+        sigma=config.tetrad_gaussian_sigma
+)
 
-# # Detect colonies
-# detected_regions = detect_colonies(
-#     binary_image
-# )
+# Detect colonies
+detected_regions = detect_colonies(
+    binary_image
+)
 # %%
