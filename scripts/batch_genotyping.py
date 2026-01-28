@@ -41,6 +41,7 @@ logger.info("Loading all images dataframe...")
 all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260125.xlsx")
 # nonE_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments != '')")
 nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna()) and round == '22th_round'")
+hard_condition_df = all_images_df.query("Kept == 'YES' and (verification_phenotype != 'E' or Comments.notna()) and round != '22th_round' and Genotyping != 'YES'")
 # processing_failed_df = nonE_or_commented_E_images_df.query("Genotyping != 'YES' and round != '1st_round' and round != '22th_round'")
 # sampled_failed_df = processing_failed_df.sample(n=20, random_state=42)
 
@@ -63,10 +64,10 @@ config = configuration(
 )
 
 # config = configuration(
-#     data_df=sampled_failed_df,
-#     pdf_output_path=Path("../results/sampled_failed_genotyping_results.pdf"),
-#     table_output_path=Path("../results/sampled_failed_genotyping_results.xlsx"),
-#     log_file=Path("../logs/batch_genotyping_sampled_failed.log")
+#     data_df=hard_condition_df,
+#     pdf_output_path=Path("../results/hard_condition_genotyping_results.pdf"),
+#     table_output_path=Path("../results/hard_condition_genotyping_results.xlsx"),
+#     log_file=Path("../logs/batch_genotyping_hard_condition.log")
 # )
 
 #  %% ============================= Logging Setup =============================
@@ -110,7 +111,10 @@ with PdfPages(config.pdf_output_path) as pdf:
                 tetrad_image_paths[day] = Path(img_path)
         if round == "22th_round":
             marker_image_path = row[ROUND0_MARKER_IMAGE_COLUMN]
-            expected_columns = 13
+            if gene_num >= 422:
+                expected_columns = 12
+            else:
+                expected_columns = 13
         else:
             marker_image_path = row[MARKER_IMAGE_COLUMN]
             expected_columns = 12
@@ -145,6 +149,7 @@ with PdfPages(config.pdf_output_path) as pdf:
                     tetrad_image_paths=tetrad_image_paths,
                     marker_image_path=marker_image_path,
                     image_info=image_info,
+                    colony_columns=expected_columns
                 )
                 fig.suptitle(
                     f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
