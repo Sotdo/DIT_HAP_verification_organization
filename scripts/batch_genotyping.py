@@ -108,10 +108,12 @@ with PdfPages(config.pdf_output_path) as pdf:
             img_path = row[col]
             if pd.notna(img_path):
                 tetrad_image_paths[day] = Path(img_path)
-        if round == "0_round":
+        if round == "22th_round":
             marker_image_path = row[ROUND0_MARKER_IMAGE_COLUMN]
+            expected_columns = 13
         else:
             marker_image_path = row[MARKER_IMAGE_COLUMN]
+            expected_columns = 12
 
         if pd.isna(marker_image_path) or not Path(marker_image_path).exists():
             logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Try genotyping by colony size.")
@@ -120,6 +122,7 @@ with PdfPages(config.pdf_output_path) as pdf:
                         tetrad_image_paths=tetrad_image_paths,
                         marker_image_path=None,
                         image_info=image_info,
+                        colony_columns=expected_columns
                 )
                 fig.suptitle(
                         f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
