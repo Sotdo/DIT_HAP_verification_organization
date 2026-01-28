@@ -40,7 +40,7 @@ logger.info("Starting batch genotyping process...")
 logger.info("Loading all images dataframe...")
 all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260125.xlsx")
 # nonE_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments != '')")
-nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna())")
+nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna()) and round == '22th_round'")
 # processing_failed_df = nonE_or_commented_E_images_df.query("Genotyping != 'YES' and round != '1st_round' and round != '22th_round'")
 # sampled_failed_df = processing_failed_df.sample(n=20, random_state=42)
 
@@ -114,9 +114,27 @@ with PdfPages(config.pdf_output_path) as pdf:
             marker_image_path = row[MARKER_IMAGE_COLUMN]
 
         if pd.isna(marker_image_path) or not Path(marker_image_path).exists():
-            logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Skipping genotyping.")
-            genotyping_failed.append((*image_info, "Marker image not found"))
-            continue
+            logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Try genotyping by colony size.")
+            try:
+                colony_regions, fig = genotyping_pipeline(
+                        tetrad_image_paths=tetrad_image_paths,
+                        marker_image_path=None,
+                        image_info=image_info,
+                )
+                fig.suptitle(
+                        f"Round {round} | Gene {gene_num} ({gene_name}, {gene_essentiality}) | "
+                        f"Colony {colony_id} | Date {date}\n"
+                        f"Phenotype: {phenotype_category} - {phenotype_description}",
+                        fontsize=24, y=1.2, fontweight='bold'
+                    )
+
+                pdf.savefig(fig, bbox_inches='tight', dpi=150)
+                plt.close(fig)
+                all_colony_regions[image_info] = colony_regions
+            except Exception as e:
+                logger.error(f"Genotyping failed for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Error: {e}")
+                genotyping_failed.append((*image_info, str(e)))
+                continue
         else:
             try:
                 marker_image_path = Path(marker_image_path)
