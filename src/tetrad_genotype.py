@@ -1613,7 +1613,7 @@ def genotyping_pipeline(
         image = io.imread(day_image_path)
         day_colonies[day]["image_notes"] = (*image_info, day) if image_info is not None else (day_image_path.stem, day)
         day_colonies[day]["image"] = image
-        day_colonies[day]["binary_image"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
+        day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
             image,
             config,
             image_notes=day_colonies[day]["image_notes"]
@@ -1712,75 +1712,75 @@ if __name__ == "__main__":
 # }
 # marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/7th_round/replica/99_any1_HYG_#3_202411.cropped.png")
 
-tetrad_image_paths={
-    3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/3d/78_SPAC607.02c_3d_#2_202412.cropped.png"),
-    4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/4d/78_SPAC607.02c_4d_#2_202412.cropped.png"),
-    5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/5d/78_SPAC607.02c_5d_#2_202412.cropped.png"),
-    6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/6d/78_SPAC607.02c_6d_#2_202412.cropped.png")
-}
-marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/replica/78_SPAC607.02c_HYG_#2_202412.cropped.png")
+# tetrad_image_paths={
+#     3: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/3d/78_SPAC607.02c_3d_#2_202412.cropped.png"),
+#     4: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/4d/78_SPAC607.02c_4d_#2_202412.cropped.png"),
+#     5: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/5d/78_SPAC607.02c_5d_#2_202412.cropped.png"),
+#     6: Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/6d/78_SPAC607.02c_6d_#2_202412.cropped.png")
+# }
+# marker_image_path=Path("/hugedata/YushengYang/DIT_HAP_verification/data/cropped_images/DIT_HAP_deletion/5th_round/replica/78_SPAC607.02c_HYG_#2_202412.cropped.png")
 
-config = Configuration(
-    tetrad_image_paths=tetrad_image_paths,
-    marker_image_path=marker_image_path
-)
+# config = Configuration(
+#     tetrad_image_paths=tetrad_image_paths,
+#     marker_image_path=marker_image_path
+# )
 
-last_day = max(config.tetrad_image_paths.keys())
-day_colonies = {}
-last_day_binary = None
-last_day_colony_regions = None
+# last_day = max(config.tetrad_image_paths.keys())
+# day_colonies = {}
+# last_day_binary = None
+# last_day_colony_regions = None
 
-# %%
-for day, day_image_path in config.tetrad_image_paths.items():
-    day_colonies[day] = {}
-    image = io.imread(day_image_path)
-    day_colonies[day]["image"] = image
-    day_colonies[day]["image_notes"] = (day_image_path.stem, day)
-    day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
-        image,
-        config,
-        day_colonies[day]["image_notes"]
-    )
-    if day == last_day and last_day_binary is None and last_day_colony_regions is None:
-        last_day_binary = day_colonies[day]["binary_image"]
-        last_day_colony_regions = day_colonies[day]["table"]
-    day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
+# # %%
+# for day, day_image_path in config.tetrad_image_paths.items():
+#     day_colonies[day] = {}
+#     image = io.imread(day_image_path)
+#     day_colonies[day]["image"] = image
+#     day_colonies[day]["image_notes"] = (day_image_path.stem, day)
+#     day_colonies[day]["binary_image"], day_colonies[day]["detected_regions"], day_colonies[day]["table"], day_colonies[day]["grids"] = colony_grid_table(
+#         image,
+#         config,
+#         day_colonies[day]["image_notes"]
+#     )
+#     if day == last_day and last_day_binary is None and last_day_colony_regions is None:
+#         last_day_binary = day_colonies[day]["binary_image"]
+#         last_day_colony_regions = day_colonies[day]["table"]
+#     day_colonies[day]["table"] = day_colonies[day]["table"].add_suffix(f"_day{day}")
 
-if last_day_binary is None or last_day_colony_regions is None:
-    raise ValueError("No tetrad images were processed.")
+# if last_day_binary is None or last_day_colony_regions is None:
+#     raise ValueError("No tetrad images were processed.")
 
-# %%
-marker_plate_image = io.imread(config.marker_image_path)
-marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
-    last_day_colony_regions,
-    marker_plate_image,
-    config
-)
+# # %%
+# marker_plate_image = io.imread(config.marker_image_path)
+# marker_aligned, colony_regions, marker_regions, scale, angle, tx, ty, matched_tetrad_centroids, matched_marker_centroids = marker_plate_point_matching(
+#     last_day_colony_regions,
+#     marker_plate_image,
+#     config
+# )
 
-# if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
-#     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
-#     marker_aligned = marker_plate_image
+# # if marker_aligned is None or len(matched_tetrad_centroids) < 3 or marker_aligned.size == 0:
+# #     logger.error(f"*** {' '.join(map(str, image_info)) if image_info else ''}: Marker plate alignment failed. No aligned marker image available.")
+# #     marker_aligned = marker_plate_image
 
-marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
-# %%
-genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
-all_colony_regions = pd.concat(
-    [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
-    axis=1
-).sort_index(level=[1,0], axis=0)
-fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
+# marker_aligned_gray = convert_to_grayscale(marker_aligned, channel=config.hyg_gray_channel)
+# # %%
+# genotyping_colony_regions = genotyping(last_day_binary, marker_aligned_gray, last_day_colony_regions, radius=config.signal_detection_radius)
+# all_colony_regions = pd.concat(
+#     [day_colonies[day]["table"] for day in sorted(day_colonies.keys())] + [genotyping_colony_regions[["genotype", "tetrad_intensity", "marker_intensity", "median_tetrad_intensity", "median_marker_intensity", "otsu_threshold", "positive_signal_median"]]],
+#     axis=1
+# ).sort_index(level=[1,0], axis=0)
+# fig = plot_genotype_results(day_colonies, marker_aligned, all_colony_regions, marker_plate_image, marker_regions, radius=config.signal_detection_radius)
 
-# %%
-image = io.imread(tetrad_image_paths[3])
+# # %%
+# image = io.imread(tetrad_image_paths[3])
 
-binary_image = binarize_image(
-        image,
-        gray_method=config.tetrad_gray_method,
-        sigma=config.tetrad_gaussian_sigma
-)
+# binary_image = binarize_image(
+#         image,
+#         gray_method=config.tetrad_gray_method,
+#         sigma=config.tetrad_gaussian_sigma
+# )
 
-# Detect colonies
-detected_regions = detect_colonies(
-    binary_image
-)
+# # Detect colonies
+# detected_regions = detect_colonies(
+#     binary_image
+# )
 # %%
