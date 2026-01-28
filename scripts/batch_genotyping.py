@@ -32,6 +32,31 @@ class configuration:
     table_output_path: Path
     log_file: Path = Path("../logs/batch_genotyping.log")
 
+# %% ============================= Constants =============================
+SPECIFIC_CASES = SPECIFIC_CASES = [('2nd_round', 57, 'exo2', '#1', 202411),
+ ('6th_round', 92, 'zrt1', '#1', 202411),
+ ('6th_round', 92, 'zrt1', '#3', 202411),
+ ('6th_round', 93, 'fkh2', '#1', 202411),
+ ('8th_round', 111, 'trr1', '#2', 202411),
+ ('8th_round', 111, 'trr1', '#3', 202411),
+ ('13th_round', 165, 'apl2', '#1', 202412),
+ ('13th_round', 165, 'apl2', '#2', 202412),
+ ('13th_round', 168, 'rpl15', '#3', 202412),
+ ('16th_round', 220, 'big1', '#2', 202504),
+ ('17th_round', 243, 'hal4', '#1', 202510),
+ ('17th_round', 243, 'hal4', '#2', 202510),
+ ('18th_round', 306, 'SPAC12G12.16c', '#2', 202511),
+ ('18th_round', 309, 'ccr1', '#1', 202511),
+ ('18th_round', 309, 'ccr1', '#2', 202511),
+ ('19th_round', 327, 'rpl15', '#1', 202511),
+ ('19th_round', 327, 'rpl15', '#2', 202511),
+ ('19th_round', 328, 'rpl2802', '#1', 202511),
+ ('19th_round', 328, 'rpl2802', '#2', 202511),
+ ('20th_round', 348, 'big1', '#1', 202511),
+ ('20th_round', 348, 'big1', '#2', 202511),
+ ('21th_round', 351, 'etr1', '#1', 202512),
+ ('23th_round', 262, 'pka1', '#1', 202512),
+ ('23th_round', 262, 'pka1', '#2', 202512)]
 
 
 # %% ============================= Main =============================
@@ -40,8 +65,8 @@ logger.info("Starting batch genotyping process...")
 logger.info("Loading all images dataframe...")
 all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260125.xlsx")
 # nonE_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments != '')")
-nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna()) and round == '22th_round'")
-hard_condition_df = all_images_df.query("Kept == 'YES' and (verification_phenotype != 'E' or Comments.notna()) and round != '22th_round' and Genotyping != 'YES'")
+nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_phenotype != 'E' or Comments.notna())")
+# hard_condition_df = all_images_df.query("Kept == 'YES' and (verification_phenotype != 'E' or Comments.notna()) and round != '22th_round' and Genotyping != 'YES'")
 # processing_failed_df = nonE_or_commented_E_images_df.query("Genotyping != 'YES' and round != '1st_round' and round != '22th_round'")
 # sampled_failed_df = processing_failed_df.sample(n=20, random_state=42)
 
@@ -119,7 +144,7 @@ with PdfPages(config.pdf_output_path) as pdf:
             marker_image_path = row[MARKER_IMAGE_COLUMN]
             expected_columns = 12
 
-        if pd.isna(marker_image_path) or not Path(marker_image_path).exists():
+        if pd.isna(marker_image_path) or not Path(marker_image_path).exists() or image_info in SPECIFIC_CASES:
             logger.warning(f"Marker image not found for round {round}, gene_num {gene_num}, gene {gene_name}, colony {colony_id}. Try genotyping by colony size.")
             try:
                 colony_regions, fig = genotyping_pipeline(
