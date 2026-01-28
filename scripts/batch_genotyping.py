@@ -38,7 +38,7 @@ class configuration:
 logger.info("Starting batch genotyping process...")
 
 logger.info("Loading all images dataframe...")
-all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260104.xlsx")
+all_images_df = pd.read_excel("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260125.xlsx")
 # nonE_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments != '')")
 nonE_or_commented_E_images_df = all_images_df.query("Kept == 'YES' and (verification_essentiality != 'E' or Comments.notna())")
 # processing_failed_df = nonE_or_commented_E_images_df.query("Genotyping != 'YES' and round != '1st_round' and round != '22th_round'")
