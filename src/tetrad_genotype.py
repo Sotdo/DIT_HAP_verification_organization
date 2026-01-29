@@ -955,9 +955,7 @@ def binarize_image(
         # Use Otsu's method to determine threshold
         thresh = threshold_otsu(blur)
         binary = blur > thresh
-    
-    # fill small holes
-    binary = ndi.binary_fill_holes(binary)
+
 
     return binary
 
