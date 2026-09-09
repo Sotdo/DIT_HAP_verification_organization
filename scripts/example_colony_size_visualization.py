@@ -13,11 +13,11 @@ from skimage import io
 plt.rcParams.update({
     'axes.unicode_minus': True,  # Correctly display minus sign
     'figure.dpi': 300,            # Image resolution
-    'axes.titlesize': 20,         # Title font size
+    'axes.titlesize': 22,         # Title font size
     'axes.titleweight': 'bold', # Title font weight
     'axes.labelsize': 18,         # Axis label font size
     'axes.labelweight': 'bold',  # Axis label font weight
-    'font.family': 'Arial',       # Set global font to Arial
+    'font.family': 'Times New Roman',       # Set global font to Arial
     'font.size': 16,              # Base font size
     'legend.fontsize': 16,        # Legend font size
     'axes.spines.top': False,      # Remove top spine
@@ -32,28 +32,39 @@ plt.rcParams.update({
 # %% ---------------------------------- Configs & Data Classes ---------------------------------- %%
 @dataclass
 class config:
-    verification_result_file: Path = Path("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260104.xlsx")
+    verification_result_file: Path = Path("../results/all_combined_all_rounds_crop_summary_manual_annotated_with_genotyping_20260129_secondary_modification.xlsx")
     colony_size_result_file: Path = Path("../results/nonE_strain_or_commented_E_genotyping_results.xlsx")
 
     def __post_init__(self):
         self.verification_result: pd.DataFrame = pd.read_excel(self.verification_result_file).query("Genotyping == 'YES' ").set_index(["gene_num", "gene_name", "round", "colony_id","date"])
         self.colony_size_result: pd.DataFrame = pd.read_excel(self.colony_size_result_file, index_col=[1,2,0,3,4])
 # %% ------------------------------------ Functions ------------------------------------ %%
-def tetrad_plate_plot(genes, cfg, relative_fraction_per_day, filtered_genotyping_results):
-    gene_index = cfg.verification_result[cfg.verification_result.index.get_level_values("gene_name").isin(genes)].index
-    # Sort by gene order in the list
-    selected_colony = gene_index.to_frame().assign(
-        gene_order=lambda df: df['gene_name'].map({gene: i for i, gene in enumerate(genes)})
-    ).sort_values('gene_order').drop('gene_order', axis=1).set_index(gene_index.names).index
-    fig, axes = plt.subplots(len(selected_colony), 6, figsize=(30, 3 * len(selected_colony)))
+def tetrad_plate_plot(genes, cfg, relative_fraction_per_day, filtered_genotyping_results, save_path=None):
+    # Accept either:
+    # - a pd.MultiIndex of full colony index tuples (gene_num, gene_name, round, colony_id, date)
+    # - or an iterable/list of gene_name strings
+    if isinstance(genes, pd.MultiIndex):
+        selected_colony = genes
+    else:
+        gene_list = list(genes)
+        gene_index = cfg.verification_result[cfg.verification_result.index.get_level_values("gene_name").isin(gene_list)].index
+        # Sort by gene order in the list
+        selected_colony = gene_index.to_frame().assign(
+            gene_order=lambda df: df['gene_name'].map({gene: i for i, gene in enumerate(gene_list)})
+        ).sort_values('gene_order').drop('gene_order', axis=1).set_index(gene_index.names).index
+
+    if len(selected_colony) == 0:
+        raise ValueError("No colonies found for provided genes/selection. Check input 'genes' and cfg.verification_result.")
+
+    fig, axes = plt.subplots(len(selected_colony), 5, figsize=(25, 3 * len(selected_colony)))
     for row, colony in enumerate(selected_colony):
-        for col, col_image in enumerate(["3d", "4d", "5d", "6d", "HYG"]):
+        for col, col_image in enumerate(["3d", "4d", "5d", "6d"]):
             image_path = cfg.verification_result.loc[colony, f"{col_image}_image_path"]
             image = io.imread(image_path)
             if col_image != "HYG":
                 axes[row, col].imshow(image, cmap="gray")
                 area_fraction = relative_fraction_per_day.loc[colony, f"area_day{col+3}"]
-                axes[row, col].set_title(f"area fraction (deletion/WT): {area_fraction}")
+                axes[row, col].set_title(f"{area_fraction}", fontsize=24, fontweight='bold')
                 day=col + 3
                 colony_coordinates = cfg.colony_size_result.loc[colony]
                 for idx, region in colony_coordinates.iterrows():
@@ -64,7 +75,8 @@ def tetrad_plate_plot(genes, cfg, relative_fraction_per_day, filtered_genotyping
                     axes[row, col].add_patch(circle)
             else:
                 axes[row, col].imshow(image)
-                axes[row, col].set_title("_".join(map(str, colony)) + "\nHYG Plate")
+                axes[row, col].set_title("Deletion Marker Plate", fontsize=24, fontweight='bold')
+                # axes[row, col].set_title("_".join(map(str, colony)) + "\nHYG Plate")
             axes[row, col].axis("off")
         
         ax_area = axes[row, -1]
@@ -74,7 +86,6 @@ def tetrad_plate_plot(genes, cfg, relative_fraction_per_day, filtered_genotyping
         area_stat = area_stat.rename_axis("day", axis=1).stack().reset_index().rename(columns={0: "area"})
         area_stat["day_num"] = area_stat["day"].str.extract(r'day(\d+)').astype(int)
         last_day = area_stat["day_num"].max()
-        # area_stat = area_stat.groupby(["col", "day"]).filter(lambda x: x.query("genotype == 'WT'").shape[0]/x.shape[0] == 0.5)
         last_day_WT_colonies_area_mean = area_stat.query("genotype == 'WT' and day_num == @last_day")["area"].median()
         area_stat["area[normalized]"] = area_stat["area"] / last_day_WT_colonies_area_mean
         area_stat = area_stat.query("genotype in ['WT', 'Deletion']")
@@ -83,8 +94,10 @@ def tetrad_plate_plot(genes, cfg, relative_fraction_per_day, filtered_genotyping
         deletion_count = colony_regions.query("genotype == 'Deletion'")["genotype"].count()
         ax_area.set_title(f"Colony Area Over Time:\n WT ({WT_count}) vs Deletion ({deletion_count})")
         ax_area.axhline(1, color='gray', linestyle='--')
-            
     plt.tight_layout()
+    
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
     plt.show()
     plt.close()
 
@@ -105,12 +118,12 @@ selected_colony = pd.MultiIndex.from_tuples([
     (np.int64(289), 'gmh4', '17th_round', '#2', np.int64(202511)),
     (np.int64(235), 'pmc3', '17th_round', '#1', np.int64(202510)),
     (np.int64(60), 'gcn5', '3rd_round', '#1', np.int64(202411)),
-    (np.int64(232), 'csn5', '17th_round', '#3', np.int64(202510)),
+    (np.int64(267), 'rpl401', '17th_round', '#2', np.int64(202511)),
     (np.int64(228), 'hul6', '17th_round', '#3', np.int64(202511)),
     (np.int64(227), 'mam2', '17th_round', '#3', np.int64(202511)),
     (np.int64(295), 'SPCC24B10.18', '17th_round', '#3', np.int64(202511))
 ], names=['gene_num', 'gene_name', 'round', 'colony_id', 'date'])
-tetrad_plate_plot(selected_colony, cfg, relative_fraction_per_day, filtered_genotyping_results)
+tetrad_plate_plot(selected_colony, cfg, relative_fraction_per_day, filtered_genotyping_results, save_path="../results/example_colony_visualization.pdf")
 # %% ------------------------------------ small colonies visualization ------------------------------------ %%
 small_colonies_genes = [
     "rps801",
