@@ -4,15 +4,15 @@ Creates formatted PDF documents compiling cropped images with metadata.
 Refactored to use PILLOW only for simpler logic.
 """
 
-import sys
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Optional
-import pandas as pd
-from PIL import Image as PILImage, ImageDraw, ImageFont
-from loguru import logger
 import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
 
+import pandas as pd
+from loguru import logger
+from PIL import Image as PILImage
+from PIL import ImageDraw, ImageFont
 from tqdm import tqdm
 
 # Add src to path for imports
@@ -193,7 +193,7 @@ def get_image_for_gene_colony(
     colony_id: str,
     date: str,
     column: str
-) -> Optional[Path]:
+) -> Path | None:
     """
     Get image path for specific gene, colony, and time point/marker.
 
@@ -731,7 +731,7 @@ def create_verification_pdf(
 
 # %% ------------------------------------ Main Functions ------------------------------------ #
 @logger.catch
-def generate_round_pdfs(config: PDFGeneratorConfig, round_name: Optional[str] = None):
+def generate_round_pdfs(config: PDFGeneratorConfig, round_name: str | None = None):
     """Generate PDFs for specified round or all rounds."""
     # Find verification table file
     verification_file = config.table_structures_path / "all_rounds_crop_summary.xlsx"

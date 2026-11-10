@@ -6,20 +6,20 @@ Usage: python scripts/batch_crop_image.py
 """
 
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
-from loguru import logger
+from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
 sys.path.append(str(Path(__file__).parent.parent.resolve() / "src"))
 
-from utils import roundConfig
 from tetrad_crop import (
     ImageProcessingConfig,
     process_tetrad_images,
-    process_time_course_tetrad_images
+    process_time_course_tetrad_images,
 )
+from utils import roundConfig
 
 # %% ------------------------------------ Configuration ------------------------------------ #
 

@@ -1,14 +1,13 @@
 # %% ============================= Imports =============================
 import sys
-from pathlib import Path
-from loguru import logger
-from tqdm import tqdm
 from dataclasses import dataclass
-
-import pandas as pd
+from pathlib import Path
 
 import matplotlib.pyplot as plt
+import pandas as pd
+from loguru import logger
 from matplotlib.backends.backend_pdf import PdfPages
+from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from tetrad_genotype import genotyping_pipeline

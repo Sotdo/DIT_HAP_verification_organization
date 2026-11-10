@@ -1,14 +1,14 @@
 # %% ------------------------------------ Import libraries ------------------------------------ #
 import sys
-from pathlib import Path
-from tqdm import tqdm
-from shutil import copyfile
 from dataclasses import dataclass
+from pathlib import Path
+from shutil import copyfile
+
 from loguru import logger
+from tqdm import tqdm
 
 sys.path.append(str(Path(__file__).parent))
-from utils import verificationMetadata, roundConfig
-
+from utils import roundConfig, verificationMetadata
 
 
 # %% ------------------------------------ Dataclasses ------------------------------------ #

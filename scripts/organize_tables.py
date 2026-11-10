@@ -4,21 +4,26 @@ Processes cropped images to create organized verification tables and generate su
 """
 
 import sys
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
+
 from loguru import logger
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent.parent / "src"))
 
-from table_organizer import (
-    TableConfig,
-    process_all_rounds as process_table_rounds,
-)
 from pdf_generator import (
     PDFGeneratorConfig,
-    generate_round_pdfs as generate_pdf_rounds,
     generate_pdf_for_given_genes,
+)
+from pdf_generator import (
+    generate_round_pdfs as generate_pdf_rounds,
+)
+from table_organizer import (
+    TableConfig,
+)
+from table_organizer import (
+    process_all_rounds as process_table_rounds,
 )
 
 
@@ -349,21 +354,21 @@ def main():
 def print_usage():
     """Print usage instructions."""
     print("DIT-HAP Table Organization and PDF Generation Script")
-    print("")
+    print()
     print("This script processes cropped images to create:")
     print("1. Organized verification tables with gene metadata")
     print("2. PDF compilations of verification data")
-    print("")
+    print()
     print("Usage:")
     print("    python scripts/organize_tables.py")
-    print("")
+    print()
     print("Configuration:")
     print("    Modify OrganizeTablesConfig class in this script")
     print("    - process_tables: Enable/disable table processing")
     print("    - generate_pdfs: Enable/disable PDF generation")
     print("    - create_samples: Create sample data for testing")
     print("    - rounds_to_process: List of specific rounds (empty = all)")
-    print("")
+    print()
     print("Requirements:")
     print("    - Cropped images from Task 2")
     print("    - Resource files in resource/ directory")

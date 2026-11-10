@@ -1,33 +1,29 @@
 # %% =============================== Imports ===============================
-from pathlib import Path
 from dataclasses import dataclass, field
-from loguru import logger
-from itertools import combinations
-
-import numpy as np
-import pandas as pd
-from matplotlib.patches import Rectangle ,Circle
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-import seaborn as sns
-
-from sklearn.linear_model import LinearRegression
+from pathlib import Path
 
 # OpenCV - Image alignment and affine transformation
 import cv2
-
-# scikit-image - Image processing toolkit
-from skimage import io, measure, morphology #,filters
-from skimage.segmentation import watershed
-from skimage.feature import peak_local_max, canny
-from skimage.filters import gaussian, threshold_otsu, sobel, scharr
-from skimage.exposure import equalize_adapthist
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from loguru import logger
+from matplotlib.figure import Figure
+from matplotlib.patches import Circle, Rectangle
+from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
 
 # scipy - Distance calculation and optimization
 # from scipy.spatial import distance
 from scipy.spatial.distance import cdist
-from scipy.optimize import linear_sum_assignment
-from scipy import ndimage
+
+# scikit-image - Image processing toolkit
+from skimage import io, measure, morphology  #,filters
+from skimage.exposure import equalize_adapthist
+from skimage.feature import peak_local_max
+from skimage.filters import gaussian, threshold_otsu
+from skimage.segmentation import watershed
 
 # Set Matplotlib global font to Arial
 # If Arial is not available, it will fallback to DejaVu Sans
@@ -757,7 +753,7 @@ def solve_grid_dataframe(
                                 df.at[idx, 'row'] = np.nan
                                 df.at[idx, 'col'] = np.nan
                         
-                        logger.info(f"Grid corrected: reassigned points after detecting empty edge column")
+                        logger.info("Grid corrected: reassigned points after detecting empty edge column")
     
     # ---------------- 9.6 Column density analysis for shift detection ----------------
     # Check for characteristic pattern: edge column empty + adjacent column over-dense
@@ -828,7 +824,7 @@ def solve_grid_dataframe(
                     df.at[idx, 'row'] = np.nan
                     df.at[idx, 'col'] = np.nan
             
-            logger.info(f"Grid corrected: reassigned points after detecting column density anomaly")
+            logger.info("Grid corrected: reassigned points after detecting column density anomaly")
     
     # ---------------- 9.7 Boundary constraint validation ----------------
     # Check if the grid extends too far beyond the actual point range
@@ -891,7 +887,7 @@ def solve_grid_dataframe(
                     df.at[idx, 'row'] = np.nan
                     df.at[idx, 'col'] = np.nan
             
-            logger.info(f"Grid corrected: reassigned points after boundary validation")
+            logger.info("Grid corrected: reassigned points after boundary validation")
     
     return df, ideal_df
 

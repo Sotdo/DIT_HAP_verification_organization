@@ -1,12 +1,13 @@
 # %% ------------------------------------ Import libraries ------------------------------------ #
 import sys
 from pathlib import Path
+
 from loguru import logger
 
 sys.path.append(str(Path(__file__).parent.parent / "src"))
-from utils import verificationMetadata, roundConfig
 from rename_functions import rename_images_per_round
 from table_organizer import TableConfig, process_all_rounds
+from utils import roundConfig, verificationMetadata
 
 # %% ------------------------------------ Logger setup ------------------------------------ #
 logger.remove()

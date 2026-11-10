@@ -3,17 +3,17 @@ Table organization for DIT-HAP verification pipeline.
 Creates comprehensive data tables with image metadata and biological context.
 """
 
-import sys
 import re
-from pathlib import Path
+import sys
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+
 import pandas as pd
 from loguru import logger
 
 # Add src to path for imports
 sys.path.append(str(Path(__file__).parent))
-from utils import verificationMetadata, roundConfig
+from utils import roundConfig, verificationMetadata
 
 
 # %% ------------------------------------ Configuration ------------------------------------ #
@@ -27,7 +27,7 @@ class TableConfig:
 
 
 # %% ------------------------------------ Helper Functions ------------------------------------ #
-def parse_image_filename(image_path: Path) -> Optional[dict]:
+def parse_image_filename(image_path: Path) -> dict | None:
     """Extract metadata from systematic filename.
 
     Args:

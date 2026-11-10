@@ -1,8 +1,9 @@
 # %% ------------------------------------ Import libraries ------------------------------------ #
-from pathlib import Path
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pandas as pd
+
 
 # %% ------------------------------------ Data classes ------------------------------------ #
 @dataclass
